@@ -10,6 +10,22 @@ pub struct DummyMainBus {
 
 #[allow(dead_code)]
 impl DummyMainBus {
+    pub fn new_test() -> Self {
+        let mut a = DummyMainBus {
+            space: [0 as u8; 0xffff],
+        };
+
+        // Exir
+        a.space[0x24] = 0x74;
+        a.space[0x25] = 0x20;
+
+        // Irex
+        a.space[0x86] = 0x28;
+        a.space[0x87] = 0x40;
+
+        a
+    }
+
     pub fn new() -> Self {
         DummyMainBus {
             space: [0 as u8; 0xffff],
