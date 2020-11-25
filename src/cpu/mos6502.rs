@@ -11,7 +11,7 @@ use std::rc::Rc;
 type InstructionPtr = fn(&mut Cpu) -> ();
 
 struct Instruction {
-    mnemonic: String,
+    mnemonic: &'static str,
     opcode: u16,
     am: AddrMode,
     cycles: u8,
@@ -19,16 +19,19 @@ struct Instruction {
     f: InstructionPtr,
 }
 
+impl Copy for Instruction {}
+
 impl Clone for Instruction {
     fn clone(&self) -> Self {
-        Self {
-            mnemonic: self.mnemonic.clone(),
-            opcode: self.opcode,
-            am: self.am,
-            cycles: self.cycles,
-            bytes: self.bytes,
-            f: self.f,
-        }
+        *self
+        // Self {
+        //     mnemonic: self.mnemonic.clone(),
+        //     opcode: self.opcode,
+        //     am: self.am,
+        //     cycles: self.cycles,
+        //     bytes: self.bytes,
+        //     f: self.f,
+        // }
     }
 }
 
@@ -45,7 +48,7 @@ impl std::fmt::Debug for Instruction {
 
 impl Instruction {
     fn new(
-        _mnemonic: &str,
+        mnemonic: &'static str,
         opcode: u16,
         am: AddrMode,
         cycles: u8,
@@ -53,7 +56,7 @@ impl Instruction {
         f: InstructionPtr,
     ) -> Self {
         Instruction {
-            mnemonic: _mnemonic.to_string(),
+            mnemonic,
             opcode,
             am,
             cycles,
@@ -90,27 +93,44 @@ pub struct Cpu {
     // TODO: 'busline' doesn't really need the Option wrapper because there is only one main bus
     // which is directly connected to the cpu and only one is needed.
     busline: Option<DummyMainBus>,
-    actual_addr: u16,
+    addr_abs: u16,
+    addr_rel: u16,
+    fetched: u8,
     time: u64,
     current: Option<Instruction>,
     state: RegSet,
+    additional_cycle: bool,
 }
 
 impl Cpu {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             busline: Some(DummyMainBus::new_test()),
-            actual_addr: 0,
+            addr_abs: 0,
+            addr_rel: 0,
+            fetched: 0,
             time: 0,
+            additional_cycle: false,
             current: None,
             state: RegSet::new(),
         }
     }
 
-    fn read_bus(&self, addr: &u16) -> u8 {
+    pub fn read_pc_byte(&mut self) -> u8 {
+        let temp = self.state.pc;
+        self.state.pc += 1;
+        self.read_bus(&temp)
+    }
+
+    pub fn read_pc_word_le(&mut self) -> u16 {
+        let lo = self.read_pc_byte() as u16;
+        let hi = self.read_pc_byte() as u16;
+        (hi << 8) | lo
+    }
+
+    pub fn read_bus(&self, addr: &u16) -> u8 {
         let mut val: u8 = 0;
         if let Some(bus) = &self.busline {
-            // let bus = bus.borrow();
             val = bus.read(addr);
         }
         val
@@ -119,8 +139,7 @@ impl Cpu {
     fn decode(&mut self) {
         // Kind of ugly.
         // todo: Clean in up, please.
-
-        let opcode = &self.actual_addr;
+        let opcode = &self.addr_abs;
         if let Some(i) = DECODING_TABLE.get(opcode) {
             self.current = Some(i.clone());
         } else {
@@ -132,56 +151,47 @@ impl Cpu {
         let prev = self.state.pc.clone();
         let opcode = self.read_bus(&prev);
         self.state.pc += 1;
-        self.actual_addr = opcode as u16;
+        self.addr_abs = opcode as u16;
     }
 
-    fn execute(&mut self) {}
+    fn execute(&mut self) {
+        // remove unwrap() (it panics - add default value)
+        let instr = self.current.as_ref().unwrap().clone();
+        self.locate(instr.am);
+        let f = instr.f;
+        f(self);
+    }
 
     fn tick(&mut self) {
-        {
-            self.fetch();
-        }
-        {
-            self.decode();
-        }
-        {
-            self.execute();
-        }
+        self.fetch();
+        self.decode();
+        self.execute();
     }
 
-    fn locate(&self, addr_info: &[&u16], mode: self::mos6502_addressing_modes::AddrMode) {
+    fn locate(&mut self, mode: self::mos6502_addressing_modes::AddrMode) {
         use self::mos6502_addressing_modes::{AddrMode::*, *};
-        let addr = addr_info[0];
 
-        let res = match mode {
+        match mode {
             Accumulator => self.acc(),
             Implied => self.imp(),
-            Immediate => self.imm(addr),
-            Relative =>  {
-                let mut rel = 0;
-                if addr_info.len() > 1 {
-                    rel = *addr_info[1];
-                }
-                // self.rel(addr, &rel)
-                None
-            }, 
-            Absolute => self.abs(addr),
-            ZeroPage => self.zp0(addr),
-            _ => None
-            // ZeroPageX => self.zpx(addr),
-            // ZeroPageY => self.zpy(addr),
-            // IndexedX => self.abx(addr),
-            // IndexedY => self.aby(addr),
-            // IndexedIndirect => self.exir(addr),
-            // Indirect => self.ind(addr)
-            // IndirectIndexed => self.irex(addr),
+            Immediate => self.imm(),
+            Relative => self.rel(),
+            Absolute => self.abs(),
+            ZeroPage => self.zp0(),
+            ZeroPageX => self.zpx(),
+            ZeroPageY => self.zpy(),
+            IndexedX => self.abx(),
+            IndexedY => self.aby(),
+            IndexedIndirect => self.exir(),
+            Indirect => self.ind(),
+            IndirectIndexed => self.irex(),
         };
     }
 }
 
 enum Vector {}
 fn instr(
-    mnemonic: &str,
+    mnemonic: &'static str,
     opcode: u16,
     func: InstructionPtr,
     addr: AddrMode,
@@ -204,85 +214,134 @@ mod mos6502_instruction_set {
 }
 
 impl Cpu {
-    pub fn acc(&self) -> Option<u16> {
-        None
+    #[must_use]
+    pub fn same_page(p: u16, q: u16) -> bool {
+        (p & 0xFF00) == (q & 0xFF00)
+    }
+}
+
+impl Cpu {
+    pub fn acc(&mut self) {
+        self.fetched = self.state.a;
+        self.additional_cycle = false;
     }
 
-    pub fn imp(&self) -> Option<u16> {
-        None
+    pub fn imp(&mut self) {
+        self.additional_cycle = false;
+        // This function should not be called
+        assert_eq!(1, 0);
     }
 
-    pub fn imm(&self, addr: &u16) -> Option<u16> {
-        None
+    pub fn imm(&mut self) {
+        let val = self.read_pc_byte();
+        self.additional_cycle = false;
+        self.fetched = val;
     }
 
-    pub fn rel(&self, addr: &u16, rel: &u16) -> Option<u16> {
-        let mut actual_addr: u16 = *addr;
-        let mut rel = *rel;
+    pub fn rel(&mut self) {
+        self.addr_rel = self.read_pc_byte() as u16;
 
-        if rel & 0x80 != 0 {
-            rel &= !0x80;
-            actual_addr -= rel;
-        } else {
-            actual_addr += rel;
+        if self.addr_rel & 0x80 != 0 {
+            self.addr_rel |= 0xff00;
         }
 
-        Some(actual_addr)
+        self.addr_abs = self.state.pc + self.addr_rel;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn abs(&self, addr: &u16) -> Option<u16> {
-        Some(*addr)
+    pub fn abs(&mut self) {
+        self.addr_abs = self.read_pc_word_le();
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn abx(&self, addr: &u16) -> Option<u16> {
-        let actual_addr = *addr + self.state.x as u16;
-        Some(actual_addr)
+    pub fn abx(&mut self) {
+        let temp = self.read_pc_word_le();
+        self.addr_abs = temp + self.state.x as u16;
+
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = Cpu::same_page(self.addr_abs, temp);
     }
 
-    pub fn aby(&self, addr: &u16) -> Option<u16> {
-        let actual_addr = *addr + self.state.y as u16;
-        Some(actual_addr)
+    pub fn aby(&mut self) {
+        let temp = self.read_pc_word_le();
+
+        self.addr_abs = temp + self.state.y as u16;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = Cpu::same_page(self.addr_abs, temp);
     }
 
-    pub fn ind(&self, addr: &u16) -> Option<u16> {
-        // Indirect is used only by JMP and the difference is that after the read, PC is set to the
-        // value stored at this address. As no chages to the cpu state are done in the location()
-        // method we do not have a different implementation then the one of abs().
-        self.abs(addr)
+    pub fn ind(&mut self) {
+        let ptr = self.read_pc_word_le();
+
+        let left: u16;
+        // simulate a hardware bug on page boundary case
+        if ptr & 0x00ff != 0 {
+            left = ptr & 0xff00;
+        } else {
+            left = ptr + 1;
+        }
+
+        let lo = self.read_bus(&ptr) as u16;
+        let hi = self.read_bus(&left) as u16;
+
+        self.addr_abs = hi << 8 | lo;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn zp0(&self, addr: &u16) -> Option<u16> {
-        let lo = *addr & 0x00ff;
-        Some(lo)
+    pub fn zp0(&mut self) {
+        let temp = self.read_pc_byte() as u16;
+        self.addr_abs = temp & 0x00ff;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn zpx(&self, addr: &u16) -> Option<u16> {
-        let lo = (*addr & 0x00ff) + self.state.x as u16;
-        Some(lo)
+    pub fn zpx(&mut self) {
+        let mut temp = self.read_pc_byte() as u16;
+        temp += self.state.x as u16;
+        self.addr_abs = temp & 0x00ff;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn zpy(&self, addr: &u16) -> Option<u16> {
-        let lo = (*addr & 0x00ff) + self.state.y as u16;
-        Some(lo)
+    pub fn zpy(&mut self) {
+        let mut temp = self.read_pc_byte() as u16;
+        temp += self.state.y as u16;
+        self.addr_abs = temp & 0x00ff;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn exir(&self, addr: &u16) -> Option<u16> {
-        // for the x register
-        let addr = (*addr & 0xff) as u8;
-        let mut i = (addr + self.state.x) as u16;
-        let lo = self.read_bus(&i) as u16; i += 1;
-        let hi = self.read_bus(&i) as u16;
-        let actual_addr = hi << 8 | lo;
-        Some(actual_addr)
+    // for the x register
+    pub fn exir(&mut self) {
+        let val = self.read_pc_byte() as u16;
+
+        let lo_addr = (val + self.state.x as u16) & 0x00ff;
+        let lo = self.read_bus(&lo_addr) as u16;
+
+        let hi_addr = (val + self.state.x as u16 + 1) & 0x00ff;
+        let hi = self.read_bus(&hi_addr) as u16;
+
+        self.addr_abs = (hi << 8) | lo;
+        self.fetched = self.read_bus(&self.addr_abs);
+        self.additional_cycle = false;
     }
 
-    pub fn irex(&self, addr: &u16) -> Option<u16> {
-        let mut i = *addr;
-        let lo = self.read_bus(&i) as u16; i += 1;
-        let hi = self.read_bus(&i) as u16;
-        let mut actual_addr = hi << 8 | lo;
-        actual_addr += self.state.y as u16;
-        Some(actual_addr)
+    pub fn irex(&mut self) {
+        let val = self.read_pc_byte() as u16;
+        let lo_addr = val & 0x00ff;
+        let lo = self.read_bus(&lo_addr) as u16;
+
+        let hi_addr = (val + 1) & 0x00ff;
+        let hi = self.read_bus(&hi_addr) as u16;
+
+        let temp = (hi << 8) | lo;
+        self.addr_abs = temp + self.state.y as u16;
+        self.fetched = self.read_bus(&self.addr_abs);
+
+        self.additional_cycle = Cpu::same_page(self.addr_abs, temp);
     }
 }
 
@@ -342,102 +401,65 @@ mod addr_modes_test {
     #[test]
     fn cpu_rel_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0x7f;
-        let rel: u16 = 0xff;
-        assert_eq!(mos6502.rel(&addr, &rel), Some(0));
     }
 
     #[test]
     fn cpu_imp_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0x0ff0;
-        assert_eq!(mos6502.imp(), None);
     }
 
     #[test]
     fn cpu_imm_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0x01B2;
-        assert_eq!(mos6502.imm(&addr), None);
     }
 
     #[test]
     fn cpu_abs_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0xff10;
-        assert_eq!(mos6502.abs(&addr), Some(0xff10));
     }
 
     #[test]
     fn cpu_absx_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.x = 4;
-        let addr: u16 = 0xff06;
-        assert_eq!(mos6502.abx(&addr), Some(0xff0A));
+        let mos6502 = Cpu::new();
     }
 
     #[test]
     fn cpu_absy_am() {
         let mut mos6502 = Cpu::new();
-        mos6502.state.y = 5;
-        let addr: u16 = 0xff05;
-        assert_eq!(mos6502.aby(&addr), Some(0xff0A));
     }
 
     #[test]
     fn cpu_zp0_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0x0005;
-        assert_eq!(mos6502.zp0(&addr), Some(5));
     }
 
     #[test]
     fn cpu_zpx_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.x = 3;
-        let addr: u16 = 5;
-        assert_eq!(mos6502.zpx(&addr), Some(8));
+        let mos6502 = Cpu::new();
     }
 
     #[test]
     fn cpu_zpy_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.y = 5;
-        let addr: u16 = 3;
-        assert_eq!(mos6502.zpy(&addr), Some(8));
+        let mos6502 = Cpu::new();
     }
 
     #[test]
     fn cpu_acc_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.a = 3;
-        assert_eq!(mos6502.acc(), None);
+        let mos6502 = Cpu::new();
     }
 
     #[test]
     fn cpu_ind_am() {
         let mos6502 = Cpu::new();
-        let addr: u16 = 0x0ff0;
-        assert_eq!(mos6502.ind(&addr), Some(0x0ff0));
     }
 
     #[test]
     fn cpu_exir_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.x = 0x4;
-        let addr: u16 = 0x20;
-        let val = mos6502.exir(&addr);
-        assert_eq!(val, Some(0x2074));
+        let mos6502 = Cpu::new();
     }
 
     #[test]
     fn cpu_irex_am() {
-        let mut mos6502 = Cpu::new();
-        mos6502.state.y = 0x10;
-        let addr: u16 = 0x86;
-        let val = mos6502.irex(&addr);
-        assert_eq!(val, Some(0x4038));
+        let mos6502 = Cpu::new();
     }
-
 }
-
