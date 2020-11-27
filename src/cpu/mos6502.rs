@@ -2,15 +2,15 @@
 use crate::bus::dummy_bus::*;
 
 use self::mos6502_addressing_modes::AddrMode;
+use super::mos6502_iset::*;
 
 use lazy_static::lazy_static;
-use std::cell::RefCell;
+use log::*;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 type InstructionPtr = fn(&mut Cpu) -> ();
 
-struct Instruction {
+pub struct Instruction {
     mnemonic: &'static str,
     opcode: u16,
     am: AddrMode,
@@ -24,14 +24,6 @@ impl Copy for Instruction {}
 impl Clone for Instruction {
     fn clone(&self) -> Self {
         *self
-        // Self {
-        //     mnemonic: self.mnemonic.clone(),
-        //     opcode: self.opcode,
-        //     am: self.am,
-        //     cycles: self.cycles,
-        //     bytes: self.bytes,
-        //     f: self.f,
-        // }
     }
 }
 
@@ -67,7 +59,7 @@ impl Instruction {
 }
 
 #[derive(Debug)]
-struct RegSet {
+pub struct RegSet {
     a: u8,
     x: u8,
     y: u8,
@@ -76,7 +68,7 @@ struct RegSet {
     ps: u8,
 }
 impl RegSet {
-    fn new() -> Self {
+    pub fn new() -> Self {
         RegSet {
             a: 0,
             x: 0,
@@ -90,22 +82,20 @@ impl RegSet {
 
 #[derive(Debug)]
 pub struct Cpu {
-    // TODO: 'busline' doesn't really need the Option wrapper because there is only one main bus
-    // which is directly connected to the cpu and only one is needed.
-    busline: Option<DummyMainBus>,
+    pub busline: Option<DummyMainBus>,
     addr_abs: u16,
     addr_rel: u16,
     fetched: u8,
-    time: u64,
-    current: Option<Instruction>,
-    state: RegSet,
+    pub time: u64,
+    pub current: Option<Instruction>,
+    pub state: RegSet,
     additional_cycle: bool,
 }
 
 impl Cpu {
     pub fn new() -> Self {
         Self {
-            busline: Some(DummyMainBus::new_test()),
+            busline: Some(DummyMainBus::new()),
             addr_abs: 0,
             addr_rel: 0,
             fetched: 0,
@@ -136,6 +126,34 @@ impl Cpu {
         val
     }
 
+    pub fn writ_word(&mut self, addr: &u16, val: &u16) -> bool {
+        let mut a = *addr;
+        let lo = (val & 0x00ff) as u8;
+        let hi = (val & 0xff00) as u8;
+        if self.writ_byte(&a, &lo) == false {
+            return false;
+        }
+        a += 1;
+        if self.writ_byte(&a, &hi) == false {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn writ_byte(&mut self, addr: &u16, val: &u8) -> bool {
+        let bus = self.busline;
+
+        if bus.is_none() {
+            return false;
+        }
+
+        let mut bus = bus.unwrap();
+        bus.write(addr, val);
+
+        return true;
+    }
+
     fn decode(&mut self) {
         // Kind of ugly.
         // todo: Clean in up, please.
@@ -148,9 +166,13 @@ impl Cpu {
     }
 
     fn fetch(&mut self) {
+        info!("Fetching...");
         let prev = self.state.pc.clone();
+        info!("PC was {:?}", prev);
         let opcode = self.read_bus(&prev);
+        info!("Next instruction is {:?}", opcode);
         self.state.pc += 1;
+        info!("PC is {:?} now", opcode);
         self.addr_abs = opcode as u16;
     }
 
@@ -162,10 +184,40 @@ impl Cpu {
         f(self);
     }
 
-    fn tick(&mut self) {
+    pub fn tick(&mut self) {
+        info!("Ticking...");
         self.fetch();
         self.decode();
         self.execute();
+    }
+
+    pub fn reset(&mut self) {
+        self.state.a = 0;
+        self.state.x = 0;
+        self.state.y = 0;
+
+        self.state.ps = 0;
+        self.state.sp = 0;
+
+        self.fetched = 0;
+
+        self.addr_abs = 0;
+        self.addr_rel = 0;
+
+        self.state.pc = ResetVectors::RESET as u16;
+        self.state.pc = self.read_pc_word_le();
+
+        info!("Cpu reset...");
+        info!("\tA = ${:#02x}", self.state.a);
+        info!("\tX = ${:#02x}", self.state.x);
+        info!("\tY = ${:#02x}", self.state.y);
+        info!("\tPC = ${:#04x}", self.state.pc);
+        info!("\tSP = ${:#04x}", self.state.sp);
+        info!("\tP = ${:#02x}", self.state.sp);
+        info!("Cpu additional...");
+        info!("\tAA = ${:#04x}", self.addr_abs);
+        info!("\tAR = ${:#04x}", self.addr_rel);
+        info!("\tF = ${:#02x}", self.fetched);
     }
 
     fn locate(&mut self, mode: self::mos6502_addressing_modes::AddrMode) {
@@ -189,8 +241,25 @@ impl Cpu {
     }
 }
 
-enum Vector {}
-fn instr(
+// All these rely on having the next byte unused
+// i.e NMI's vector is actual $fffa-$ffff, reset's - $fffc-$fffd and irq's - $fffe-$ffff
+pub enum ResetVectors {
+    NMI = 0xfffa,
+    RESET = 0xfffc,
+    IRQ = 0xfffe,
+}
+
+const FLAGS_DEFAULT: u8 = I | U;
+const N: u8 = 1 << 7;
+const V: u8 = 1 << 6;
+const U: u8 = 1 << 5;
+const B: u8 = 1 << 4;
+const D: u8 = 1 << 3;
+const I: u8 = 1 << 2;
+const Z: u8 = 1 << 1;
+const C: u8 = 1 << 0;
+
+pub fn instr(
     mnemonic: &'static str,
     opcode: u16,
     func: InstructionPtr,
@@ -345,7 +414,7 @@ impl Cpu {
     }
 }
 
-mod mos6502_addressing_modes {
+pub mod mos6502_addressing_modes {
     #[derive(Copy, Clone)]
     pub enum AddrMode {
         Accumulator,
@@ -425,7 +494,7 @@ mod addr_modes_test {
 
     #[test]
     fn cpu_absy_am() {
-        let mut mos6502 = Cpu::new();
+        let mos6502 = Cpu::new();
     }
 
     #[test]
@@ -445,7 +514,11 @@ mod addr_modes_test {
 
     #[test]
     fn cpu_acc_am() {
-        let mos6502 = Cpu::new();
+        let mut mos6502 = Cpu::new();
+        let i = instr("Using ACC AM", 0x00, Cpu::rol, AddrMode::Accumulator, 1, 2);
+        println!("{:?}", i);
+        mos6502.current = Some(i);
+        mos6502.tick();
     }
 
     #[test]
