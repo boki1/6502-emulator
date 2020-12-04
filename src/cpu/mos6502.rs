@@ -1,18 +1,24 @@
 #![cfg_attr(debug_assertions, allow(dead_code, unused_imports, unused_variables))]
-use crate::bus::dummy_bus::*;
 
-use self::mos6502_addressing_modes::AddrMode;
-use super::mos6502_iset::*;
+use std::{thread, time};
+use std::collections::HashMap;
 
+use ansi_term::Colour;
 use lazy_static::lazy_static;
 use log::*;
-use std::collections::HashMap;
+
+use crate::bus::dummy_bus::*;
+
+use super::mos6502_dt::DECODING_TABLE;
+use super::mos6502_iset::*;
+
+use self::mos6502_addressing_modes::AddrMode;
 
 type InstructionPtr = fn(&mut Cpu) -> ();
 
 pub struct Instruction {
     mnemonic: &'static str,
-    opcode: u16,
+    pub opcode: u16,
     am: AddrMode,
     cycles: u8,
     bytes: u8,
@@ -32,6 +38,7 @@ impl std::fmt::Debug for Instruction {
         f.debug_struct("Instruction")
             .field("mnemonic", &self.mnemonic)
             .field("opcode", &self.opcode)
+            .field("addrm", &self.am)
             .field("cycles", &self.cycles)
             .field("bytes", &self.bytes)
             .finish()
@@ -60,13 +67,14 @@ impl Instruction {
 
 #[derive(Debug)]
 pub struct RegSet {
-    a: u8,
-    x: u8,
-    y: u8,
-    sp: u16,
-    pc: u16,
-    ps: u8,
+    pub a: u8,
+    pub x: u8,
+    pub y: u8,
+    pub sp: u16,
+    pub pc: u16,
+    pub ps: u8,
 }
+
 impl RegSet {
     pub fn new() -> Self {
         RegSet {
@@ -80,16 +88,37 @@ impl RegSet {
     }
 }
 
+impl std::fmt::Display for RegSet {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "A=${:#4x}\nX=${:#4x} | Y=${:#4x}\nP={:#8b}\nSP=${:#4x}\nPC=${:#4x}\n",
+            self.a, self.x, self.y, self.ps, self.sp, self.pc
+        )
+    }
+}
+
 #[derive(Debug)]
 pub struct Cpu {
     pub busline: Option<DummyMainBus>,
     addr_abs: u16,
     addr_rel: u16,
-    fetched: u8,
+    temp_opcode: u8,
+    pub fetched: u8,
     pub time: u64,
     pub current: Option<Instruction>,
     pub state: RegSet,
     additional_cycle: bool,
+}
+
+impl std::fmt::Display for Cpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "T={:#4x}\n{}AA={:#4x}\nAR={:#4x}\n",
+            self.time, self.state, self.addr_abs, self.addr_rel
+        )
+    }
 }
 
 impl Cpu {
@@ -98,12 +127,25 @@ impl Cpu {
             busline: Some(DummyMainBus::new()),
             addr_abs: 0,
             addr_rel: 0,
+            temp_opcode: 0,
             fetched: 0,
             time: 0,
             additional_cycle: false,
             current: None,
             state: RegSet::new(),
         }
+    }
+
+    pub fn read_word_and_inc(&self, addr: &mut u16) -> u16 {
+        let lo = self.read_and_inc(addr);
+        let hi = self.read_and_inc(addr);
+        u16::from_le_bytes([lo, hi])
+    }
+
+    pub fn read_and_inc(&self, addr: &mut u16) -> u8 {
+        let lo = self.read_bus(addr);
+        *addr += 1;
+        lo
     }
 
     pub fn read_pc_byte(&mut self) -> u8 {
@@ -113,9 +155,9 @@ impl Cpu {
     }
 
     pub fn read_pc_word_le(&mut self) -> u16 {
-        let lo = self.read_pc_byte() as u16;
-        let hi = self.read_pc_byte() as u16;
-        (hi << 8) | lo
+        let lo = self.read_pc_byte();
+        let hi = self.read_pc_byte();
+        u16::from_le_bytes([lo, hi])
     }
 
     pub fn read_bus(&self, addr: &u16) -> u8 {
@@ -127,14 +169,15 @@ impl Cpu {
     }
 
     pub fn writ_word(&mut self, addr: &u16, val: &u16) -> bool {
-        let mut a = *addr;
-        let lo = (val & 0x00ff) as u8;
-        let hi = (val & 0xff00) as u8;
-        if self.writ_byte(&a, &lo) == false {
+        let bytes = val.to_le().to_le_bytes();
+        let val_lo = bytes[0];
+        let val_hi = bytes[1];
+        let mut addr_ = *addr;
+        if self.writ_byte(&addr_, &val_lo) == false {
             return false;
         }
-        a += 1;
-        if self.writ_byte(&a, &hi) == false {
+        addr_ += 1;
+        if self.writ_byte(&addr_, &val_hi) == false {
             return false;
         }
 
@@ -142,52 +185,61 @@ impl Cpu {
     }
 
     pub fn writ_byte(&mut self, addr: &u16, val: &u8) -> bool {
-        let bus = self.busline;
+        let bus = &mut self.busline;
 
         if bus.is_none() {
             return false;
         }
 
-        let mut bus = bus.unwrap();
+        let bus = bus.as_mut().unwrap();
         bus.write(addr, val);
 
         return true;
     }
 
+    fn fetch(&mut self) {
+        info!("\tFetching...");
+        let prev = self.state.pc.clone();
+        info!("\tPC was {:#04x}", prev);
+        self.temp_opcode = self.read_bus(&prev);
+        info!("\tNext instruction is {:#04x}", self.temp_opcode);
+        self.state.pc += 1;
+        info!("\tPC is {:#04x} now", self.temp_opcode);
+    }
+
     fn decode(&mut self) {
-        // Kind of ugly.
-        // todo: Clean in up, please.
-        let opcode = &self.addr_abs;
-        if let Some(i) = DECODING_TABLE.get(opcode) {
+        info!("Decoding...");
+        info!("opcode={:?}", self.temp_opcode);
+        if let Some(i) = DECODING_TABLE.get(&self.temp_opcode) {
             self.current = Some(i.clone());
+            info!("instruction present -> {:?}", i);
         } else {
             self.current = None;
+            info!("instruction missing");
         }
     }
 
-    fn fetch(&mut self) {
-        info!("Fetching...");
-        let prev = self.state.pc.clone();
-        info!("PC was {:?}", prev);
-        let opcode = self.read_bus(&prev);
-        info!("Next instruction is {:?}", opcode);
-        self.state.pc += 1;
-        info!("PC is {:?} now", opcode);
-        self.addr_abs = opcode as u16;
-    }
-
     fn execute(&mut self) {
-        // remove unwrap() (it panics - add default value)
-        let instr = self.current.as_ref().unwrap().clone();
-        self.locate(instr.am);
-        let f = instr.f;
+        info!("Executing...");
+
+        let i: Instruction = match self.current.as_ref() {
+            Some(ii) => self.current.as_ref().unwrap().clone(),
+            None => instr("BLANK", 0x00, Cpu::nop, AddrMode::Implied, 1, 1),
+        };
+
+        info!("\t{:?}", i);
+        self.locate(i.am);
+        let f = i.f;
         f(self);
     }
 
     pub fn tick(&mut self) {
         info!("Ticking...");
+        // thread::sleep(time::Duration::from_secs(1));
         self.fetch();
+        // thread::sleep(time::Duration::from_secs(1));
         self.decode();
+        // thread::sleep(time::Duration::from_secs(1));
         self.execute();
     }
 
@@ -203,24 +255,23 @@ impl Cpu {
 
         self.addr_abs = 0;
         self.addr_rel = 0;
+        self.temp_opcode = 0;
 
-        self.state.pc = ResetVectors::RESET as u16;
-        self.state.pc = self.read_pc_word_le();
+        self.state.pc = Vectors::RESET as u16;
+        let mut temp_pc = self.state.pc.clone();
+        let __pc = self.read_word_and_inc(&mut temp_pc);
+        if __pc == 0 {
+            self.state.pc = LOAD_ADDR_DEFAULT;
+        } else {
+            self.state.pc = __pc;
+        }
 
-        info!("Cpu reset...");
-        info!("\tA = ${:#02x}", self.state.a);
-        info!("\tX = ${:#02x}", self.state.x);
-        info!("\tY = ${:#02x}", self.state.y);
-        info!("\tPC = ${:#04x}", self.state.pc);
-        info!("\tSP = ${:#04x}", self.state.sp);
-        info!("\tP = ${:#02x}", self.state.sp);
-        info!("Cpu additional...");
-        info!("\tAA = ${:#04x}", self.addr_abs);
-        info!("\tAR = ${:#04x}", self.addr_rel);
-        info!("\tF = ${:#02x}", self.fetched);
+        info!("Reseting...");
+        info!("{}", self);
     }
 
     fn locate(&mut self, mode: self::mos6502_addressing_modes::AddrMode) {
+        info!("Locating...");
         use self::mos6502_addressing_modes::{AddrMode::*, *};
 
         match mode {
@@ -241,9 +292,9 @@ impl Cpu {
     }
 }
 
-// All these rely on having the next byte unused
-// i.e NMI's vector is actual $fffa-$ffff, reset's - $fffc-$fffd and irq's - $fffe-$ffff
-pub enum ResetVectors {
+const LOAD_ADDR_DEFAULT: u16 = 0x8000;
+
+pub enum Vectors {
     NMI = 0xfffa,
     RESET = 0xfffc,
     IRQ = 0xfffe,
@@ -270,12 +321,6 @@ pub fn instr(
     Instruction::new(mnemonic, opcode, addr, cycles, bytes, func)
 }
 
-lazy_static! {
-    static ref DECODING_TABLE: HashMap<u16, Instruction> = hashmap! {
-         0x00 => instr("TEST", 0x00, mos6502_instruction_set::nop, AddrMode::Accumulator, 0, 0),
-    };
-}
-
 mod mos6502_instruction_set {
     use super::*;
 
@@ -287,45 +332,139 @@ impl Cpu {
     pub fn same_page(p: u16, q: u16) -> bool {
         (p & 0xFF00) == (q & 0xFF00)
     }
+
+    pub fn disasemble_region(&self, begin: u16, end: u16) {
+        //-> Asm {
+        use AddrMode::*;
+
+        let _code_map: HashMap<u16, &str> = HashMap::new();
+
+        let mut line: String = String::new();
+        let mut oper: &Instruction;
+        let mut opcode: u8;
+        let mut addr: u16 = begin;
+        let mut _temp_addr: u16 = addr;
+        let mut entry: Option<&Instruction>;
+        let mut val: u8;
+        let mut full: u16;
+        let mut spec: String = String::new();
+
+        for i in begin..end {
+            opcode = self.read_and_inc(&mut addr);
+            entry = DECODING_TABLE.get(&opcode);
+            if entry.is_none() {
+                continue;
+            }
+            _temp_addr = addr;
+            oper = entry.unwrap();
+            line.clear();
+            spec.clear();
+            let addr_str = _temp_addr.to_string();
+            line.push_str(&format!("{:#4x}: \t{} \t", _temp_addr, oper.mnemonic));
+
+            match oper.am {
+                Accumulator => {}
+                Implied => {}
+                Immediate => {
+                    val = self.read_and_inc(&mut addr);
+                    spec = format!("#{:#02x}", val);
+                }
+                Indirect => {
+                    full = self.read_word_and_inc(&mut addr);
+                    spec = format!("{:#04x}", full);
+                }
+                Relative => {
+                    val = self.read_and_inc(&mut addr);
+                    spec = format!("{:#04x} [${:#4x}]", val, addr);
+                }
+                Absolute => {
+                    full = self.read_word_and_inc(&mut addr);
+                    spec = format!("{:#04x}", full);
+                }
+                ZeroPage => {
+                    full = self.read_and_inc(&mut addr) as u16;
+                    spec = format!("{:#02x}", full);
+                }
+                ZeroPageX => {
+                    full = self.read_and_inc(&mut addr) as u16;
+                    spec = format!("{:#02x}, X", full);
+                }
+                ZeroPageY => {
+                    full = self.read_and_inc(&mut addr) as u16;
+                    spec = format!("{:#02x}, Y", full);
+                }
+                IndexedX => {
+                    full = self.read_word_and_inc(&mut addr);
+                    spec = format!("{:#04x}, X", full);
+                }
+                IndexedY => {
+                    full = self.read_word_and_inc(&mut addr);
+                    spec = format!("{:#04x}, Y", full);
+                }
+                IndexedIndirect => {
+                    full = self.read_and_inc(&mut addr) as u16;
+                    spec = format!("({:#02x}, X)", full);
+                }
+                IndirectIndexed => {
+                    full = self.read_and_inc(&mut addr) as u16;
+                    spec = format!("({:#02x}), Y", full);
+                }
+            }
+
+            line.push_str(&spec);
+            // line.push_str(&format!(" {:?}", oper.am));
+
+            println!("{}", line);
+            // code_map.insert(temp_addr, &a);
+        }
+        // Asm::from(code_map, begin)
+    }
 }
 
 impl Cpu {
     pub fn acc(&mut self) {
+        info!("{:?}", AddrMode::Accumulator);
         self.fetched = self.state.a;
         self.additional_cycle = false;
     }
 
     pub fn imp(&mut self) {
+        info!("{:?}", AddrMode::Implied);
         self.additional_cycle = false;
         // This function should not be called
-        assert_eq!(1, 0);
+        // TODO: Uncomment next assert
+        // assert_eq!(1, 0);
     }
 
     pub fn imm(&mut self) {
+        info!("{:?}", AddrMode::Immediate);
         let val = self.read_pc_byte();
         self.additional_cycle = false;
         self.fetched = val;
     }
 
     pub fn rel(&mut self) {
+        info!("{:?}", AddrMode::Relative);
         self.addr_rel = self.read_pc_byte() as u16;
 
         if self.addr_rel & 0x80 != 0 {
             self.addr_rel |= 0xff00;
         }
 
-        self.addr_abs = self.state.pc + self.addr_rel;
+        self.addr_abs = self.state.pc.wrapping_add(self.addr_rel);
         self.fetched = self.read_bus(&self.addr_abs);
         self.additional_cycle = false;
     }
 
     pub fn abs(&mut self) {
+        info!("{:?}", AddrMode::Absolute);
         self.addr_abs = self.read_pc_word_le();
         self.fetched = self.read_bus(&self.addr_abs);
         self.additional_cycle = false;
     }
 
     pub fn abx(&mut self) {
+        info!("{:?}", AddrMode::IndexedX);
         let temp = self.read_pc_word_le();
         self.addr_abs = temp + self.state.x as u16;
 
@@ -334,6 +473,7 @@ impl Cpu {
     }
 
     pub fn aby(&mut self) {
+        info!("{:?}", AddrMode::IndexedY);
         let temp = self.read_pc_word_le();
 
         self.addr_abs = temp + self.state.y as u16;
@@ -342,6 +482,7 @@ impl Cpu {
     }
 
     pub fn ind(&mut self) {
+        info!("{:?}", AddrMode::Indirect);
         let ptr = self.read_pc_word_le();
 
         let left: u16;
@@ -361,6 +502,7 @@ impl Cpu {
     }
 
     pub fn zp0(&mut self) {
+        info!("{:?}", AddrMode::ZeroPage);
         let temp = self.read_pc_byte() as u16;
         self.addr_abs = temp & 0x00ff;
         self.fetched = self.read_bus(&self.addr_abs);
@@ -368,6 +510,7 @@ impl Cpu {
     }
 
     pub fn zpx(&mut self) {
+        info!("{:?}", AddrMode::ZeroPageX);
         let mut temp = self.read_pc_byte() as u16;
         temp += self.state.x as u16;
         self.addr_abs = temp & 0x00ff;
@@ -376,6 +519,7 @@ impl Cpu {
     }
 
     pub fn zpy(&mut self) {
+        info!("{:?}", AddrMode::ZeroPageY);
         let mut temp = self.read_pc_byte() as u16;
         temp += self.state.y as u16;
         self.addr_abs = temp & 0x00ff;
@@ -385,6 +529,7 @@ impl Cpu {
 
     // for the x register
     pub fn exir(&mut self) {
+        info!("{:?}", AddrMode::IndexedIndirect);
         let val = self.read_pc_byte() as u16;
 
         let lo_addr = (val + self.state.x as u16) & 0x00ff;
@@ -399,6 +544,7 @@ impl Cpu {
     }
 
     pub fn irex(&mut self) {
+        info!("{:?}", AddrMode::IndirectIndexed);
         let val = self.read_pc_byte() as u16;
         let lo_addr = val & 0x00ff;
         let lo = self.read_bus(&lo_addr) as u16;
@@ -431,6 +577,7 @@ pub mod mos6502_addressing_modes {
         IndexedIndirect,
         IndirectIndexed,
     }
+
     impl std::fmt::Debug for AddrMode {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             use self::AddrMode::*;
@@ -454,85 +601,39 @@ pub mod mos6502_addressing_modes {
     }
 }
 
-#[test]
-fn cpu_read() {
-    let mos6502 = Cpu::new();
-    let addr = 0x4151;
-    let value_original = 0;
-    let value_read = mos6502.read_bus(&addr);
-    assert_eq!(value_original, value_read);
+#[derive(Debug)]
+pub struct Asm<'a> {
+    code: HashMap<u16, &'a str>,
+    origin: u16,
 }
 
-#[cfg(test)]
-mod addr_modes_test {
-    use super::*;
+impl std::fmt::Display for Asm<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "\t*={:#04x}\n", self.origin())?;
+        for (key, val) in self.map().iter() {
+            write!(f, "\t{}\n", val)?;
+        }
+        Ok(())
+    }
+}
 
-    #[test]
-    fn cpu_rel_am() {
-        let mos6502 = Cpu::new();
+impl<'a> Asm<'a> {
+    pub fn from(code_map: HashMap<u16, &'a str>, origin: u16) -> Self {
+        Self {
+            code: code_map,
+            origin,
+        }
     }
 
-    #[test]
-    fn cpu_imp_am() {
-        let mos6502 = Cpu::new();
+    pub fn map_mut(&mut self) -> &mut HashMap<u16, &'a str> {
+        &mut self.code
     }
 
-    #[test]
-    fn cpu_imm_am() {
-        let mos6502 = Cpu::new();
+    pub fn map(&self) -> &HashMap<u16, &'a str> {
+        &self.code
     }
 
-    #[test]
-    fn cpu_abs_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_absx_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_absy_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_zp0_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_zpx_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_zpy_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_acc_am() {
-        let mut mos6502 = Cpu::new();
-        let i = instr("Using ACC AM", 0x00, Cpu::rol, AddrMode::Accumulator, 1, 2);
-        println!("{:?}", i);
-        mos6502.current = Some(i);
-        mos6502.tick();
-    }
-
-    #[test]
-    fn cpu_ind_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_exir_am() {
-        let mos6502 = Cpu::new();
-    }
-
-    #[test]
-    fn cpu_irex_am() {
-        let mos6502 = Cpu::new();
+    pub fn origin(&self) -> u16 {
+        self.origin.clone()
     }
 }

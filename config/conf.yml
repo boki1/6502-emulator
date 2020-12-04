@@ -1,0 +1,20 @@
+# Scan this file for changes every ...
+refresh_rate: 1 minutes
+
+appenders:
+  # An appender named "stdout" that writes to stdout
+  stdout:
+    kind: console
+
+  # An appender named "requests" that writes to a file with a custom pattern encoder
+  f:
+    kind: file
+    path: "output.log"
+    encoder:
+      # pattern: "{d} - {m}{n}"
+      pattern: "{m}{n}"
+
+root:
+  level: info
+  appenders:
+    - f
