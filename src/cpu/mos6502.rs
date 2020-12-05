@@ -1,7 +1,7 @@
 #![cfg_attr(debug_assertions, allow(dead_code, unused_imports, unused_variables))]
 
-use std::{thread, time};
 use std::collections::HashMap;
+use std::{thread, time};
 
 use ansi_term::Colour;
 use lazy_static::lazy_static;
@@ -83,7 +83,7 @@ impl RegSet {
             y: 0,
             sp: 0,
             pc: 0,
-            ps: 0,
+            ps: Flag::initial(),
         }
     }
 }
@@ -235,11 +235,8 @@ impl Cpu {
 
     pub fn tick(&mut self) {
         info!("Ticking...");
-        // thread::sleep(time::Duration::from_secs(1));
         self.fetch();
-        // thread::sleep(time::Duration::from_secs(1));
         self.decode();
-        // thread::sleep(time::Duration::from_secs(1));
         self.execute();
     }
 
@@ -248,8 +245,8 @@ impl Cpu {
         self.state.x = 0;
         self.state.y = 0;
 
-        self.state.ps = 0;
-        self.state.sp = 0;
+        self.state.ps = Flag::initial();
+        self.state.pc = Vectors::RESET as u16;
 
         self.fetched = 0;
 
@@ -257,7 +254,6 @@ impl Cpu {
         self.addr_rel = 0;
         self.temp_opcode = 0;
 
-        self.state.pc = Vectors::RESET as u16;
         let mut temp_pc = self.state.pc.clone();
         let __pc = self.read_word_and_inc(&mut temp_pc);
         if __pc == 0 {
@@ -290,6 +286,48 @@ impl Cpu {
             IndirectIndexed => self.irex(),
         };
     }
+
+    fn irq(&mut self) {
+        let skptr = self.state.sp;
+        let mut pc_temp = self.state.pc;
+        self.writ_word(&skptr, &pc_temp);
+        let p = self.state.ps;
+        self.writ_byte(&skptr, &p);
+        self.state.sp = skptr;
+
+        self.flag_drop(Flag::I);
+        let mut load_addr = Vectors::IRQ as u16;
+        let lo = self.read_and_inc(&mut load_addr) as u16;
+        let hi = self.read_bus(&load_addr) as u16;
+        pc_temp = hi << 8 | lo;
+        self.state.pc = pc_temp;
+    }
+
+    fn nmi(&mut self) {
+        let skptr = self.state.sp;
+        let mut pc_temp = self.state.pc;
+        self.writ_word(&skptr, &pc_temp);
+        let p = self.state.ps;
+        self.writ_byte(&skptr, &p);
+        self.state.sp = skptr;
+
+        self.flag_drop(Flag::I);
+        let mut load_addr = Vectors::NMI as u16;
+        let lo = self.read_and_inc(&mut load_addr) as u16;
+        let hi = self.read_bus(&load_addr) as u16;
+        pc_temp = hi << 8 | lo;
+        self.state.pc = pc_temp;
+    }
+
+    pub fn flag_drop(&mut self, f: Flag) -> u8 {
+        self.state.ps &= !f.as_num();
+        self.state.ps
+    }
+
+    pub fn flag_raise(&mut self, f: Flag) -> u8 {
+        self.state.ps |= f.as_num();
+        self.state.ps
+    }
 }
 
 const LOAD_ADDR_DEFAULT: u16 = 0x8000;
@@ -300,15 +338,26 @@ pub enum Vectors {
     IRQ = 0xfffe,
 }
 
-const FLAGS_DEFAULT: u8 = I | U;
-const N: u8 = 1 << 7;
-const V: u8 = 1 << 6;
-const U: u8 = 1 << 5;
-const B: u8 = 1 << 4;
-const D: u8 = 1 << 3;
-const I: u8 = 1 << 2;
-const Z: u8 = 1 << 1;
-const C: u8 = 1 << 0;
+pub enum Flag {
+    N = 1 << 7,
+    V = 1 << 6,
+    U = 1 << 5,
+    B = 1 << 4,
+    D = 1 << 3,
+    I = 1 << 2,
+    Z = 1 << 1,
+    C = 1 << 0,
+}
+
+impl Flag {
+    pub fn as_num(self) -> u8 {
+        self as u8
+    }
+
+    pub fn initial() -> u8 {
+        Flag::I.as_num() | Flag::U.as_num()
+    }
+}
 
 pub fn instr(
     mnemonic: &'static str,
@@ -319,12 +368,6 @@ pub fn instr(
     bytes: u8,
 ) -> Instruction {
     Instruction::new(mnemonic, opcode, addr, cycles, bytes, func)
-}
-
-mod mos6502_instruction_set {
-    use super::*;
-
-    pub fn nop(cpu: &mut Cpu) {}
 }
 
 impl Cpu {
@@ -343,24 +386,25 @@ impl Cpu {
         let mut oper: &Instruction;
         let mut opcode: u8;
         let mut addr: u16 = begin;
-        let mut _temp_addr: u16 = addr;
+        let mut rel_addr: u16;
+        let mut temp_addr: u16 = addr;
         let mut entry: Option<&Instruction>;
         let mut val: u8;
         let mut full: u16;
         let mut spec: String = String::new();
 
-        for i in begin..end {
+        while addr < end {
             opcode = self.read_and_inc(&mut addr);
             entry = DECODING_TABLE.get(&opcode);
             if entry.is_none() {
                 continue;
             }
-            _temp_addr = addr;
+            temp_addr = addr;
             oper = entry.unwrap();
             line.clear();
             spec.clear();
-            let addr_str = _temp_addr.to_string();
-            line.push_str(&format!("{:#4x}: \t{} \t", _temp_addr, oper.mnemonic));
+            let addr_str = temp_addr.to_string();
+            line.push_str(&format!("{:#4x}:\t{}  ", temp_addr, oper.mnemonic));
 
             match oper.am {
                 Accumulator => {}
@@ -375,7 +419,11 @@ impl Cpu {
                 }
                 Relative => {
                     val = self.read_and_inc(&mut addr);
-                    spec = format!("{:#04x} [${:#4x}]", val, addr);
+                    rel_addr = addr + val as u16;
+                    if rel_addr & 0x80 != 0 {
+                        rel_addr -= 127;
+                    }
+                    spec = format!("{:#04x} [${:#4x}]", val, rel_addr);
                 }
                 Absolute => {
                     full = self.read_word_and_inc(&mut addr);

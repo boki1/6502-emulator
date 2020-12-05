@@ -46,7 +46,6 @@ fn main() {
     bus.load_prog(&load_addr, prog);
     let ibus = &*bus;
     ibus.dump(Some("memdump.txt".to_string()));
-    // ibus.dump(None);
 
     loop {
         mos6502.tick();
@@ -64,7 +63,7 @@ fn main() {
     println!("here's the asm code\n");
     println!("done.");
 
-    let mut inp: String = String::new();
-    std::io::stdin().read_line(&mut inp);
+    let mut _inp: String = String::new();
+    std::io::stdin().read_line(&mut _inp).unwrap();
     std::fs::remove_file("output.log").unwrap();
 }
