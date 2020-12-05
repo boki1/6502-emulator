@@ -1,7 +1,7 @@
 #![cfg_attr(debug_assertions, allow(dead_code, unused_imports, unused_variables))]
 
-use std::{thread, time};
 use std::collections::HashMap;
+use std::{thread, time};
 
 use ansi_term::Colour;
 use lazy_static::lazy_static;
@@ -13,14 +13,15 @@ use super::mos6502_dt::DECODING_TABLE;
 use super::mos6502_iset::*;
 
 use self::mos6502_addressing_modes::AddrMode;
+use std::iter::FromIterator;
 
 type InstructionPtr = fn(&mut Cpu) -> ();
 
 pub struct Instruction {
-    mnemonic: &'static str,
+    pub mnemonic: &'static str,
     pub opcode: u16,
-    am: AddrMode,
-    cycles: u8,
+    pub am: AddrMode,
+    pub cycles: u8,
     bytes: u8,
     f: InstructionPtr,
 }
@@ -70,7 +71,7 @@ pub struct RegSet {
     pub a: u8,
     pub x: u8,
     pub y: u8,
-    pub sp: u16,
+    pub sp: u8,
     pub pc: u16,
     pub ps: u8,
 }
@@ -83,7 +84,7 @@ impl RegSet {
             y: 0,
             sp: 0,
             pc: 0,
-            ps: 0,
+            ps: Flag::initial(),
         }
     }
 }
@@ -101,14 +102,14 @@ impl std::fmt::Display for RegSet {
 #[derive(Debug)]
 pub struct Cpu {
     pub busline: Option<DummyMainBus>,
-    addr_abs: u16,
-    addr_rel: u16,
+    pub addr_abs: u16,
+    pub addr_rel: u16,
     temp_opcode: u8,
     pub fetched: u8,
     pub time: u64,
     pub current: Option<Instruction>,
     pub state: RegSet,
-    additional_cycle: bool,
+    pub additional_cycle: bool,
 }
 
 impl std::fmt::Display for Cpu {
@@ -235,11 +236,8 @@ impl Cpu {
 
     pub fn tick(&mut self) {
         info!("Ticking...");
-        // thread::sleep(time::Duration::from_secs(1));
         self.fetch();
-        // thread::sleep(time::Duration::from_secs(1));
         self.decode();
-        // thread::sleep(time::Duration::from_secs(1));
         self.execute();
     }
 
@@ -248,8 +246,8 @@ impl Cpu {
         self.state.x = 0;
         self.state.y = 0;
 
-        self.state.ps = 0;
-        self.state.sp = 0;
+        self.state.ps = Flag::initial();
+        self.state.pc = Vectors::RESET as u16;
 
         self.fetched = 0;
 
@@ -257,7 +255,6 @@ impl Cpu {
         self.addr_rel = 0;
         self.temp_opcode = 0;
 
-        self.state.pc = Vectors::RESET as u16;
         let mut temp_pc = self.state.pc.clone();
         let __pc = self.read_word_and_inc(&mut temp_pc);
         if __pc == 0 {
@@ -290,25 +287,89 @@ impl Cpu {
             IndirectIndexed => self.irex(),
         };
     }
+
+    fn irq(&mut self) {
+        let skptr_u16 = self.state.sp as u16;
+        let mut pc_temp = self.state.pc;
+        self.writ_word(&skptr_u16, &pc_temp);
+        let p = self.state.ps;
+        self.writ_byte(&skptr_u16, &p);
+        self.state.sp = skptr_u16 as u8;
+
+        self.flag_drop(Flag::I);
+        let mut load_addr = Vectors::IRQ as u16;
+        let lo = self.read_and_inc(&mut load_addr) as u16;
+        let hi = self.read_bus(&load_addr) as u16;
+        pc_temp = hi << 8 | lo;
+        self.state.pc = pc_temp;
+    }
+
+    fn nmi(&mut self) {
+        let skptr_u16 = self.state.sp as u16;
+        let mut pc_temp = self.state.pc;
+        self.writ_word(&skptr_u16, &pc_temp);
+        let p = self.state.ps;
+        self.writ_byte(&skptr_u16, &p);
+        self.state.sp = skptr_u16 as u8;
+
+        self.flag_drop(Flag::I);
+        let mut load_addr = Vectors::NMI as u16;
+        let lo = self.read_and_inc(&mut load_addr) as u16;
+        let hi = self.read_bus(&load_addr) as u16;
+        pc_temp = hi << 8 | lo;
+        self.state.pc = pc_temp;
+    }
+
+    pub fn flagv(&self, f: Flag) -> bool {
+        self.state.ps & f.as_num() != 0
+    }
+    pub fn flag(&mut self, f: Flag, m: bool) {
+        if m {
+            self.flag_raise(f);
+        } else {
+            self.flag_drop(f);
+        }
+    }
+
+    pub fn flag_drop(&mut self, f: Flag) -> u8 {
+        self.state.ps &= !f.as_num();
+        self.state.ps
+    }
+
+    pub fn flag_raise(&mut self, f: Flag) -> u8 {
+        self.state.ps |= f.as_num();
+        self.state.ps
+    }
 }
 
 const LOAD_ADDR_DEFAULT: u16 = 0x8000;
+pub const STACK_BASE: u16 = 0x100;
 
 pub enum Vectors {
     NMI = 0xfffa,
     RESET = 0xfffc,
     IRQ = 0xfffe,
 }
+pub enum Flag {
+    N = 1 << 7,
+    V = 1 << 6,
+    U = 1 << 5,
+    B = 1 << 4,
+    D = 1 << 3,
+    I = 1 << 2,
+    Z = 1 << 1,
+    C = 1 << 0,
+}
 
-const FLAGS_DEFAULT: u8 = I | U;
-const N: u8 = 1 << 7;
-const V: u8 = 1 << 6;
-const U: u8 = 1 << 5;
-const B: u8 = 1 << 4;
-const D: u8 = 1 << 3;
-const I: u8 = 1 << 2;
-const Z: u8 = 1 << 1;
-const C: u8 = 1 << 0;
+impl Flag {
+    pub fn as_num(self) -> u8 {
+        self as u8
+    }
+
+    pub fn initial() -> u8 {
+        Flag::I.as_num() | Flag::U.as_num()
+    }
+}
 
 pub fn instr(
     mnemonic: &'static str,
@@ -321,46 +382,43 @@ pub fn instr(
     Instruction::new(mnemonic, opcode, addr, cycles, bytes, func)
 }
 
-mod mos6502_instruction_set {
-    use super::*;
-
-    pub fn nop(cpu: &mut Cpu) {}
-}
-
 impl Cpu {
     #[must_use]
     pub fn same_page(p: u16, q: u16) -> bool {
         (p & 0xFF00) == (q & 0xFF00)
     }
 
-    pub fn disasemble_region(&self, begin: u16, end: u16) {
-        //-> Asm {
+    pub fn disassemble_region(&self, begin: u16, end: u16) -> Asm {
         use AddrMode::*;
 
-        let _code_map: HashMap<u16, &str> = HashMap::new();
+        let mut code_map: HashMap<u16, Box<String>> = HashMap::new();
 
-        let mut line: String = String::new();
+        let mut line: String;
         let mut oper: &Instruction;
         let mut opcode: u8;
         let mut addr: u16 = begin;
-        let mut _temp_addr: u16 = addr;
+        let mut rel_addr: u16;
+        let mut temp_addr: u16;
         let mut entry: Option<&Instruction>;
         let mut val: u8;
         let mut full: u16;
-        let mut spec: String = String::new();
+        let mut spec: String;
 
-        for i in begin..end {
+        let mut cols: u8;
+
+        while addr < end {
             opcode = self.read_and_inc(&mut addr);
             entry = DECODING_TABLE.get(&opcode);
             if entry.is_none() {
                 continue;
             }
-            _temp_addr = addr;
+            temp_addr = addr;
             oper = entry.unwrap();
-            line.clear();
-            spec.clear();
-            let addr_str = _temp_addr.to_string();
-            line.push_str(&format!("{:#4x}: \t{} \t", _temp_addr, oper.mnemonic));
+            line = "".to_string();
+            spec = "".to_string();
+            let addr_str = temp_addr.to_string();
+            line.push_str(&format!("{:#4x}:\t{}  ", temp_addr, oper.mnemonic));
+            cols = 2;
 
             match oper.am {
                 Accumulator => {}
@@ -368,34 +426,48 @@ impl Cpu {
                 Immediate => {
                     val = self.read_and_inc(&mut addr);
                     spec = format!("#{:#02x}", val);
+                    cols += 1;
                 }
                 Indirect => {
                     full = self.read_word_and_inc(&mut addr);
                     spec = format!("{:#04x}", full);
+                    cols += 1;
                 }
                 Relative => {
                     val = self.read_and_inc(&mut addr);
-                    spec = format!("{:#04x} [${:#4x}]", val, addr);
+                    rel_addr = addr;
+                    if val > 127 {
+                        rel_addr -= (0xff - val + 1) as u16;
+                    } else {
+                        rel_addr += val as u16;
+                    }
+                    spec = format!("{:#04x} (=${:#4x}) ", val, rel_addr);
+                    cols += 4;
                 }
                 Absolute => {
                     full = self.read_word_and_inc(&mut addr);
                     spec = format!("{:#04x}", full);
+                    cols += 1;
                 }
                 ZeroPage => {
                     full = self.read_and_inc(&mut addr) as u16;
                     spec = format!("{:#02x}", full);
+                    cols += 1;
                 }
                 ZeroPageX => {
                     full = self.read_and_inc(&mut addr) as u16;
                     spec = format!("{:#02x}, X", full);
+                    cols += 2;
                 }
                 ZeroPageY => {
                     full = self.read_and_inc(&mut addr) as u16;
                     spec = format!("{:#02x}, Y", full);
+                    cols += 2;
                 }
                 IndexedX => {
                     full = self.read_word_and_inc(&mut addr);
                     spec = format!("{:#04x}, X", full);
+                    cols += 2;
                 }
                 IndexedY => {
                     full = self.read_word_and_inc(&mut addr);
@@ -404,20 +476,24 @@ impl Cpu {
                 IndexedIndirect => {
                     full = self.read_and_inc(&mut addr) as u16;
                     spec = format!("({:#02x}, X)", full);
+                    cols += 2;
                 }
                 IndirectIndexed => {
                     full = self.read_and_inc(&mut addr) as u16;
                     spec = format!("({:#02x}), Y", full);
+                    cols += 2;
                 }
             }
 
             line.push_str(&spec);
-            // line.push_str(&format!(" {:?}", oper.am));
+            for i in 0..(7 - cols) {
+                line.push_str("    ");
+            }
+            line.push_str(&format!("{:?}", oper.am));
 
-            println!("{}", line);
-            // code_map.insert(temp_addr, &a);
+            code_map.insert(temp_addr, Box::from(line.clone()));
         }
-        // Asm::from(code_map, begin)
+        Asm::from(code_map, begin)
     }
 }
 
@@ -561,7 +637,7 @@ impl Cpu {
 }
 
 pub mod mos6502_addressing_modes {
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, PartialEq)]
     pub enum AddrMode {
         Accumulator,
         Implied,
@@ -582,55 +658,63 @@ pub mod mos6502_addressing_modes {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             use self::AddrMode::*;
             let which = match *self {
-                Accumulator => "Accumulator AM",
-                Implied => "Implied AM",
-                Immediate => "Immediate AM",
-                Indirect => "Indirect AM",
-                Relative => "Relative AM",
-                Absolute => "Absolute AM",
-                ZeroPage => "ZeroPage AM",
-                ZeroPageX => "ZeroPageX AM",
-                ZeroPageY => "ZeroPageY AM",
-                IndexedX => "IndexedX AM",
-                IndexedY => "IndexedY AM",
-                IndexedIndirect => "IndexedIndirect AM",
-                IndirectIndexed => "IndirectIndexed AM",
+                Accumulator => "ACC",
+                Implied => "IMP",
+                Immediate => "IMM",
+                Indirect => "IND",
+                Relative => "REL",
+                Absolute => "ABS",
+                ZeroPage => "ZP0",
+                ZeroPageX => "ZPX",
+                ZeroPageY => "ZPY",
+                IndexedX => "INX",
+                IndexedY => "INY",
+                IndexedIndirect => "EXIR",
+                IndirectIndexed => "IREX",
             };
-            f.write_str(&which)
+            f.write_str(&format!(" `{}`", which))
         }
     }
 }
 
 #[derive(Debug)]
-pub struct Asm<'a> {
-    code: HashMap<u16, &'a str>,
+pub struct Asm {
+    code: HashMap<u16, Box<String>>,
     origin: u16,
 }
 
-impl std::fmt::Display for Asm<'_> {
+impl std::fmt::Display for Asm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "\t*={:#04x}\n", self.origin())?;
-        for (key, val) in self.map().iter() {
+        for (key, val) in self.this_map().iter() {
             write!(f, "\t{}\n", val)?;
         }
         Ok(())
     }
 }
 
-impl<'a> Asm<'a> {
-    pub fn from(code_map: HashMap<u16, &'a str>, origin: u16) -> Self {
+impl Asm {
+    pub fn from(code_map: HashMap<u16, Box<String>>, origin: u16) -> Self {
+        let mut v: Vec<_> = code_map.into_iter().collect();
+        v.sort_by(|x, y| x.0.cmp(&y.0));
         Self {
-            code: code_map,
+            code: HashMap::from_iter(v),
             origin,
         }
     }
 
-    pub fn map_mut(&mut self) -> &mut HashMap<u16, &'a str> {
+    pub fn map_mut(&mut self) -> &mut HashMap<u16, Box<String>> {
         &mut self.code
     }
 
-    pub fn map(&self) -> &HashMap<u16, &'a str> {
+    pub fn this_map(&self) -> &HashMap<u16, Box<String>> {
         &self.code
+    }
+
+    pub fn map_sorted(&self) -> Vec<(&u16, &Box<String>)> {
+        let mut sorted: Vec<(&u16, &Box<String>)> = self.this_map().iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        sorted
     }
 
     pub fn origin(&self) -> u16 {
