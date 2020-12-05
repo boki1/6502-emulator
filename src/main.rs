@@ -9,19 +9,17 @@ extern crate ansi_term;
 extern crate lazy_static;
 extern crate log;
 extern crate log4rs;
+extern crate olc_pixel_game_engine;
 
-#[test]
-fn it_works() {
-    assert_eq!(1, 1);
-}
+use olc_pixel_game_engine as olc;
 
 use bus::dummy_bus::*;
 use cpu::mos6502::*;
+use cpu::mos6502_vis::view;
 
 mod debugging {
 
     use super::*;
-
     pub(super) fn setup_logger() {
         log4rs::init_file("config/conf.yml", Default::default()).unwrap();
     }
@@ -47,23 +45,26 @@ fn main() {
     let ibus = &*bus;
     ibus.dump(Some("memdump.txt".to_string()));
 
-    loop {
-        mos6502.tick();
-        if mos6502.current.is_none() {
-            break;
-        }
+    let mut cpu_window = view::CpuView { cpu: mos6502 };
+    olc::start("mos 6502", &mut cpu_window, 800, 620, 3, 3).unwrap();
 
-        if mos6502.current.unwrap().opcode == 0x00 {
-            break;
-        }
-    }
+    // loop {
+    //     mos6502.tick();
+    //     if mos6502.current.is_none() {
+    //         break;
+    //     }
+    //
+    //     if mos6502.current.unwrap().opcode == 0x00 {
+    //         break;
+    //     }
+    // }
 
     // let asm_code = mos6502.disasemble_region(0x8000, 0x8020);
-    mos6502.disasemble_region(0x8000, 0x801d);
-    println!("here's the asm code\n");
-    println!("done.");
+    // mos6502.disasemble_region(0x8000, 0x801d);
+    // println!("here's the asm code\n");
+    // println!("done.");
 
-    let mut _inp: String = String::new();
-    std::io::stdin().read_line(&mut _inp).unwrap();
-    std::fs::remove_file("output.log").unwrap();
+    // let mut _inp: String = String::new();
+    // std::io::stdin().read_line(&mut _inp).unwrap();
+    // std::fs::remove_file("output.log").unwrap();
 }

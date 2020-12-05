@@ -319,6 +319,10 @@ impl Cpu {
         self.state.pc = pc_temp;
     }
 
+    pub fn flag(&self, f: Flag) -> bool {
+        self.state.ps & f.as_num() != 0
+    }
+
     pub fn flag_drop(&mut self, f: Flag) -> u8 {
         self.state.ps &= !f.as_num();
         self.state.ps
