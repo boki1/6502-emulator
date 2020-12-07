@@ -4,8 +4,16 @@ use olc_pixel_game_engine as olc;
 pub mod view {
     use super::*;
 
+    #[derive(PartialEq)]
+    pub enum CpuViewPoint {
+        MemView,
+        CpuStateCodeView,
+        CombinedView,
+    }
+
     pub struct CpuView {
         pub cpu: Cpu,
+        pub pov: CpuViewPoint,
     }
 
     impl olc::Application for CpuView {
@@ -13,9 +21,7 @@ pub mod view {
             Ok(())
         }
         fn on_user_update(&mut self, _elapsed_time: f32) -> Result<(), olc::Error> {
-            olc::clear(olc::BLACK);
-            self.display_mem(2, 2, 0x0, 16, 16)?;
-            self.display_mem(2, 220, 0x8000, 16, 16)?;
+            olc::clear(olc::BLUE);
 
             if olc::get_key(olc::Key::SPACE).pressed {
                 self.cpu.tick();
@@ -25,8 +31,21 @@ pub mod view {
                 self.cpu.reset();
             }
 
-            olc::draw_line(0, 500, 800, 500, olc::GREY);
-            self.display_cpu_state(2, 510)?;
+            if olc::get_key(olc::Key::C).pressed {
+                self.pov = CpuViewPoint::CpuStateCodeView;
+            } else if olc::get_key(olc::Key::M).pressed {
+                self.pov = CpuViewPoint::MemView;
+            }
+
+            if self.pov == CpuViewPoint::MemView {
+                self.display_mem(50, 50, 0x0, 16, 16)?;
+                self.display_mem(50, 270, 0x8000, 16, 16)?;
+            } else if self.pov == CpuViewPoint::CpuStateCodeView {
+                olc::draw_rect(130, 175, 200, 150, olc::WHITE);
+                olc::draw_rect(110, 155, 240, 190, olc::WHITE);
+                self.display_cpu_state(200, 200)?;
+            }
+
             Ok(())
         }
 

@@ -380,11 +380,10 @@ impl Cpu {
         (p & 0xFF00) == (q & 0xFF00)
     }
 
-    pub fn disasemble_region(&self, begin: u16, end: u16) {
-        //-> Asm {
+    pub fn disasemble_region(&self, begin: u16, end: u16) -> Asm {
         use AddrMode::*;
 
-        let _code_map: HashMap<u16, &str> = HashMap::new();
+        let mut code_map: HashMap<u16, Box<String>> = HashMap::new();
 
         let mut line: String = String::new();
         let mut oper: &Instruction;
@@ -405,8 +404,8 @@ impl Cpu {
             }
             temp_addr = addr;
             oper = entry.unwrap();
-            line.clear();
-            spec.clear();
+            line = "".to_string();
+            spec = "".to_string();
             let addr_str = temp_addr.to_string();
             line.push_str(&format!("{:#4x}:\t{}  ", temp_addr, oper.mnemonic));
 
@@ -464,12 +463,11 @@ impl Cpu {
             }
 
             line.push_str(&spec);
-            // line.push_str(&format!(" {:?}", oper.am));
+            line.push_str(&format!(" {:?}", oper.am));
 
-            println!("{}", line);
-            // code_map.insert(temp_addr, &a);
+            code_map.insert(temp_addr, Box::from(line.clone()));
         }
-        // Asm::from(code_map, begin)
+        Asm::from(code_map, begin)
     }
 }
 
@@ -654,12 +652,12 @@ pub mod mos6502_addressing_modes {
 }
 
 #[derive(Debug)]
-pub struct Asm<'a> {
-    code: HashMap<u16, &'a str>,
+pub struct Asm {
+    code: HashMap<u16, Box<String>>,
     origin: u16,
 }
 
-impl std::fmt::Display for Asm<'_> {
+impl std::fmt::Display for Asm {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "\t*={:#04x}\n", self.origin())?;
         for (key, val) in self.map().iter() {
@@ -669,19 +667,19 @@ impl std::fmt::Display for Asm<'_> {
     }
 }
 
-impl<'a> Asm<'a> {
-    pub fn from(code_map: HashMap<u16, &'a str>, origin: u16) -> Self {
+impl Asm {
+    pub fn from(code_map: HashMap<u16, Box<String>>, origin: u16) -> Self {
         Self {
             code: code_map,
             origin,
         }
     }
 
-    pub fn map_mut(&mut self) -> &mut HashMap<u16, &'a str> {
+    pub fn map_mut(&mut self) -> &mut HashMap<u16, Box<String>> {
         &mut self.code
     }
 
-    pub fn map(&self) -> &HashMap<u16, &'a str> {
+    pub fn map(&self) -> &HashMap<u16, Box<String>> {
         &self.code
     }
 

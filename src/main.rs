@@ -15,7 +15,7 @@ use olc_pixel_game_engine as olc;
 
 use bus::dummy_bus::*;
 use cpu::mos6502::*;
-use cpu::mos6502_vis::view;
+use cpu::mos6502_vis::view::*;
 
 mod debugging {
 
@@ -38,33 +38,21 @@ fn main() {
     let bus = mos6502.busline.as_mut().unwrap();
     let prog: &[u8] = &vec![
         0xA2, 0x0A, 0x8E, 0x00, 0x00, 0xA2, 0x03, 0x8E, 0x01, 0x00, 0xAC, 0x00, 0x00, 0xA9, 0x00,
-        0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA,
+        0x18, 0x6D, 0x01, 0x00, 0x88, 0xD0, 0xFA, 0x8D, 0x02, 0x00, 0xEA, 0xEA, 0xEA, 0xEA, 0xEA,
     ];
 
     bus.load_prog(&load_addr, prog);
     let ibus = &*bus;
     ibus.dump(Some("memdump.txt".to_string()));
 
-    let mut cpu_window = view::CpuView { cpu: mos6502 };
-    olc::start("mos 6502", &mut cpu_window, 800, 620, 3, 3).unwrap();
+    for (l, code) in mos6502.disasemble_region(0x8000, 0x8020).map().iter() {
+        println!("{}\t{}", l, code);
+    }
 
-    // loop {
-    //     mos6502.tick();
-    //     if mos6502.current.is_none() {
-    //         break;
-    //     }
-    //
-    //     if mos6502.current.unwrap().opcode == 0x00 {
-    //         break;
-    //     }
-    // }
-
-    // let asm_code = mos6502.disasemble_region(0x8000, 0x8020);
-    // mos6502.disasemble_region(0x8000, 0x801d);
-    // println!("here's the asm code\n");
-    // println!("done.");
-
-    // let mut _inp: String = String::new();
-    // std::io::stdin().read_line(&mut _inp).unwrap();
-    // std::fs::remove_file("output.log").unwrap();
+    let mut cpu_window = CpuView {
+        cpu: mos6502,
+        // pov: CpuViewPoint::CpuStateCodeView,
+        pov: CpuViewPoint::MemView,
+    };
+    olc::start("mos 6502", &mut cpu_window, 800, 500, 8, 8).unwrap();
 }
