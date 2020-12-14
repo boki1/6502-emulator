@@ -1,14 +1,18 @@
-use super::mos6502::*;
 use olc_pixel_game_engine as olc;
 
+use super::mos6502::*;
+
 pub mod view {
+    use std::thread::sleep;
+    use std::time::Duration;
+
     use super::*;
 
     #[derive(PartialEq)]
     pub enum CpuViewPoint {
         MemView,
         CpuStateCodeView,
-        CombinedView,
+        DisassemblyView,
     }
 
     pub struct CpuView {
@@ -21,7 +25,7 @@ pub mod view {
             Ok(())
         }
         fn on_user_update(&mut self, _elapsed_time: f32) -> Result<(), olc::Error> {
-            olc::clear(olc::BLUE);
+            olc::clear(olc::BLACK);
 
             if olc::get_key(olc::Key::SPACE).pressed {
                 self.cpu.tick();
@@ -35,15 +39,17 @@ pub mod view {
                 self.pov = CpuViewPoint::CpuStateCodeView;
             } else if olc::get_key(olc::Key::M).pressed {
                 self.pov = CpuViewPoint::MemView;
+            } else if olc::get_key(olc::Key::D).pressed {
+                self.pov = CpuViewPoint::DisassemblyView;
             }
 
             if self.pov == CpuViewPoint::MemView {
                 self.display_mem(50, 50, 0x0, 16, 16)?;
                 self.display_mem(50, 270, 0x8000, 16, 16)?;
             } else if self.pov == CpuViewPoint::CpuStateCodeView {
-                olc::draw_rect(130, 175, 200, 150, olc::WHITE);
-                olc::draw_rect(110, 155, 240, 190, olc::WHITE);
                 self.display_cpu_state(200, 200)?;
+            } else if self.pov == CpuViewPoint::DisassemblyView {
+                self.display_code(50, 50)?;
             }
 
             Ok(())
@@ -186,6 +192,30 @@ pub mod view {
         }
 
         pub fn display_code(&self, x: i32, y: i32) -> Result<(), olc::Error> {
+            // olc::draw_string(x, y, "code code code", olc::CYAN);
+            let pc = self.cpu.state.pc;
+            let begin = pc - 10;
+            let end = pc + 10;
+            let mut c = olc::WHITE;
+            let mut this_y = y;
+            // for tup in sorted {
+            //     let l = tup.0;
+            //     let code = tup.1;
+            //     println!("{}\t{}", l, code);
+            // }
+            for (idx, tup) in self
+                .cpu
+                .disassemble_region(begin, end)
+                .map_sorted()
+                .iter()
+                .enumerate()
+            {
+                let l = tup.0;
+                let code = tup.1;
+                c = if *l == pc { olc::DARK_CYAN } else { olc::WHITE };
+                this_y = y + (idx as i32 * 12);
+                olc::draw_string(x, this_y, &format!("{}\t{}", l, code), c)?;
+            }
             Ok(())
         }
     }

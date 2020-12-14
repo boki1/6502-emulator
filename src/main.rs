@@ -1,14 +1,11 @@
 #![allow(dead_code)]
 
-mod bus;
-mod cpu;
-
-#[macro_use]
-extern crate maplit;
 extern crate ansi_term;
 extern crate lazy_static;
 extern crate log;
 extern crate log4rs;
+#[macro_use]
+extern crate maplit;
 extern crate olc_pixel_game_engine;
 
 use olc_pixel_game_engine as olc;
@@ -16,10 +13,15 @@ use olc_pixel_game_engine as olc;
 use bus::dummy_bus::*;
 use cpu::mos6502::*;
 use cpu::mos6502_vis::view::*;
+use std::collections::HashMap;
+use std::iter::FromIterator;
+
+mod bus;
+mod cpu;
 
 mod debugging {
-
     use super::*;
+
     pub(super) fn setup_logger() {
         log4rs::init_file("config/conf.yml", Default::default()).unwrap();
     }
@@ -45,13 +47,17 @@ fn main() {
     let ibus = &*bus;
     ibus.dump(Some("memdump.txt".to_string()));
 
-    for (l, code) in mos6502.disasemble_region(0x8000, 0x8020).map().iter() {
+    let disassemble = mos6502.disassemble_region(0x8000, 0x8020);
+    let mut sorted: Vec<_> = disassemble.map().iter().collect();
+    sorted.sort_by(|a, b| a.0.cmp(b.0));
+    for tup in sorted {
+        let l = tup.0;
+        let code = tup.1;
         println!("{}\t{}", l, code);
     }
 
     let mut cpu_window = CpuView {
         cpu: mos6502,
-        // pov: CpuViewPoint::CpuStateCodeView,
         pov: CpuViewPoint::MemView,
     };
     olc::start("mos 6502", &mut cpu_window, 800, 500, 8, 8).unwrap();

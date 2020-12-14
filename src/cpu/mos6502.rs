@@ -13,6 +13,7 @@ use super::mos6502_dt::DECODING_TABLE;
 use super::mos6502_iset::*;
 
 use self::mos6502_addressing_modes::AddrMode;
+use std::iter::FromIterator;
 
 type InstructionPtr = fn(&mut Cpu) -> ();
 
@@ -380,7 +381,7 @@ impl Cpu {
         (p & 0xFF00) == (q & 0xFF00)
     }
 
-    pub fn disasemble_region(&self, begin: u16, end: u16) -> Asm {
+    pub fn disassemble_region(&self, begin: u16, end: u16) -> Asm {
         use AddrMode::*;
 
         let mut code_map: HashMap<u16, Box<String>> = HashMap::new();
@@ -632,21 +633,20 @@ pub mod mos6502_addressing_modes {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             use self::AddrMode::*;
             let which = match *self {
-                Accumulator => "Accumulator AM",
-                Implied => "Implied AM",
-                Immediate => "Immediate AM",
-                Indirect => "Indirect AM",
-                Relative => "Relative AM",
-                Absolute => "Absolute AM",
-                ZeroPage => "ZeroPage AM",
-                ZeroPageX => "ZeroPageX AM",
-                ZeroPageY => "ZeroPageY AM",
-                IndexedX => "IndexedX AM",
-                IndexedY => "IndexedY AM",
-                IndexedIndirect => "IndexedIndirect AM",
-                IndirectIndexed => "IndirectIndexed AM",
+                Accumulator => "ACC",
+                Implied => "IMP",
+                Immediate => "IMM",
+                Indirect => "IND", Relative => "REL",
+                Absolute => "ABS",
+                ZeroPage => "ZP0",
+                ZeroPageX => "ZPX",
+                ZeroPageY => "ZPY",
+                IndexedX => "INX",
+                IndexedY => "INY",
+                IndexedIndirect => "EXIR",
+                IndirectIndexed => "IREX",
             };
-            f.write_str(&which)
+            f.write_str(&format!(" __{}", which))
         }
     }
 }
@@ -669,8 +669,10 @@ impl std::fmt::Display for Asm {
 
 impl Asm {
     pub fn from(code_map: HashMap<u16, Box<String>>, origin: u16) -> Self {
+        let mut v: Vec<_> = code_map.into_iter().collect();
+        v.sort_by(|x,y| x.0.cmp(&y.0));
         Self {
-            code: code_map,
+            code: HashMap::from_iter(v),
             origin,
         }
     }
@@ -681,6 +683,12 @@ impl Asm {
 
     pub fn map(&self) -> &HashMap<u16, Box<String>> {
         &self.code
+    }
+
+    pub fn map_sorted(&mut self) -> Vec<(&u16, &Box<String>)> {
+        let mut sorted: Vec<(&u16, &Box<String>)> = self.map().iter().collect();
+        sorted.sort_by(|a, b| a.0.cmp(b.0));
+        sorted
     }
 
     pub fn origin(&self) -> u16 {
