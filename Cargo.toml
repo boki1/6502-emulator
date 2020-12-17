@@ -7,7 +7,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-ansi_term = "0.12.0"
 maplit = "1.0.2"
 log = "0.4"
 log4rs = "0.13.0"
@@ -15,3 +14,4 @@ lazy_static = "1.4.0"
 env_logger = "0.8.2"
 chrono = "0.4.19"
 olc_pixel_game_engine = "0.1"
+rand = "0.8.3"

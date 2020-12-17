@@ -3,3 +3,4 @@ Cargo.lock
 scripts/autogen
 imgs/
 .idea/
+config/
