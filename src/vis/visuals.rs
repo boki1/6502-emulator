@@ -3,18 +3,20 @@ use olc_pixel_game_engine as olc;
 use crate::cpu::mos6502::{Asm, Flag::*, Vectors};
 use crate::nes::nes::Nes;
 
-#[derive(PartialEq)]
-pub enum MonitorPOV {
-    MemView,
-    CpuStateCodeView,
-    DisassemblyView,
-    PictureView,
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum Layouts {
+    RAM,
+    Internals,
+    Disassembly,
+    PaletteAndPattern,
+    Help,
+    Game,
 }
 
 pub struct GuiMonitor<'console> {
     pub nes: &'console mut Nes,
-    pub pov: MonitorPOV,
-    pub disassemble: Option<Asm>,
+    pub curr_layout: Layouts,
+    pub disassembly: Option<Asm>,
     pub in_stepping_mode: bool,
     pub extra_time: f32,
 }
@@ -23,24 +25,31 @@ impl olc::Application for GuiMonitor<'_> {
     fn on_user_create(&mut self) -> Result<(), olc::Error> {
         let cpu = self.nes.cpu_mut();
 
-        self.disassemble = Some(cpu.disassemble_region(0x0000, 0xffff));
+        self.disassembly = Some(cpu.disassemble_region(0x0000, 0xffff));
         Ok(())
     }
 
     fn on_user_update(&mut self, elapsed_time: f32) -> Result<(), olc::Error> {
+        use olc::{get_key, Key::*};
+
         olc::clear(olc::BLACK);
 
         if self.in_stepping_mode {
-            self.check_input();
-            self.check_pov_input();
+            self.handle_debugger_input();
+            self.handle_layout_input();
         } else {
             self.nes.sys_clock();
         }
 
-        self.display();
+        self.display_curr_layout();
+        // self.handle_controller_input();
 
-        if olc::get_key(olc::Key::T).pressed {
+        if get_key(SPACE).pressed {
             self.in_stepping_mode = !self.in_stepping_mode;
+        }
+
+        if get_key(R).pressed {
+            self.nes.reset();
         }
 
         Ok(())
@@ -52,62 +61,82 @@ impl olc::Application for GuiMonitor<'_> {
 }
 
 impl GuiMonitor<'_> {
-    fn display(&self) {
-        match self.pov {
-            MonitorPOV::MemView => {
+    fn display_curr_layout(&self) {
+        use Layouts::*;
+        match self.curr_layout {
+            RAM => {
                 self.display_mem(50, 50, 0x0, 16, 16);
                 self.display_mem(50, 270, 0x8000, 16, 16);
             }
-            MonitorPOV::CpuStateCodeView => {
-                self.display_cpu_state(50, 50);
+            Internals => {
+                self.display_cpu_state(20, 20);
+                self.display_ppu_state(60, 20);
+                self.display_controller_state(100, 20);
             }
-            MonitorPOV::DisassemblyView => {
+            PaletteAndPattern => {
+                self.display_pattern_with_palette(50, 50);
+            }
+            Disassembly => {
                 self.display_code(150, 50);
             }
-            MonitorPOV::PictureView => {
-                self.display_picture(2, 2);
+            Game => {
+                self.display_game(2, 2);
             }
+            Help => {}
         }
     }
 
-    fn check_pov_input(&mut self) {
-        if olc::get_key(olc::Key::P).pressed {
-            self.pov = MonitorPOV::PictureView;
-        } else if olc::get_key(olc::Key::C).pressed {
-            self.pov = MonitorPOV::CpuStateCodeView;
-        } else if olc::get_key(olc::Key::M).pressed {
-            self.pov = MonitorPOV::MemView;
-        } else if olc::get_key(olc::Key::D).pressed {
-            self.pov = MonitorPOV::DisassemblyView;
+    fn handle_layout_input(&mut self) {
+        use olc::{get_key, Key::*};
+        use Layouts::*;
+
+        self.curr_layout = if get_key(G).pressed {
+            Game
+        } else if get_key(I).pressed {
+            Internals
+        } else if get_key(M).pressed {
+            RAM
+        } else if get_key(D).pressed {
+            Disassembly
+        } else if get_key(T).pressed {
+            PaletteAndPattern
+        } else if get_key(H).pressed {
+            Help
+        } else {
+            self.curr_layout
         }
     }
 
-    fn check_input(&mut self) {
+    fn handle_debugger_input(&mut self) {
+        use olc::{get_key, Key::*};
+
         let cpu = self.nes.cpu_mut();
 
-        if olc::get_key(olc::Key::S).pressed {
-            cpu.tick();
-        }
-
-        if olc::get_key(olc::Key::N).pressed {
+        if get_key(N).pressed {
             self.nes.sys_clock();
         }
 
-        if olc::get_key(olc::Key::F).pressed {
-            while self.nes.ppu.frame_end == false {
+        if get_key(F).pressed {
+            while self.nes.ppu().frame_has_ended() == false {
                 self.nes.sys_clock();
             }
-            self.nes.ppu.frame_end = false;
         }
 
-        if olc::get_key(olc::Key::R).pressed {
-            self.nes.reset();
+        if get_key(S).pressed {
+            while self.nes.cpu().instr_has_executed() == false {
+                self.nes.sys_clock();
+            }
         }
+    }
+
+    fn handle_controller_input(&mut self) {
+        // TODO:
+        unimplemented!();
     }
 }
 
 impl GuiMonitor<'_> {
-    pub fn display_picture(&self, x_begin: i32, y_begin: i32) {
+    pub fn display_game(&self, x_begin: i32, y_begin: i32) {
         olc::draw_sprite(x_begin, y_begin, self.nes.ppu.screen());
     }
 
@@ -135,6 +164,21 @@ impl GuiMonitor<'_> {
             disp_addr.clear();
         }
         Ok(())
+    }
+
+    pub fn display_pattern_with_palette(&self, x: i32, y: i32) -> Result<(), olc::Error> {
+        // TODO:
+        unimplemented!();
+    }
+
+    pub fn display_controller_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
+        // TODO:
+        unimplemented!();
+    }
+
+    pub fn display_ppu_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
+        // TODO:
+        unimplemented!();
     }
 
     pub fn display_cpu_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
@@ -240,14 +284,14 @@ impl GuiMonitor<'_> {
     }
 
     pub fn display_code(&self, x: i32, y: i32) -> Result<(), olc::Error> {
-        if self.disassemble.is_none() {
+        if self.disassembly.is_none() {
             olc::draw_string_with_scale(x, y + 200, "No disassembly :(", olc::DARK_RED, 3)?;
             return Ok(());
         }
 
         let cpu = self.nes.cpu();
 
-        let disassembly = self.disassemble.as_ref().unwrap().this_map();
+        let disassembly = self.disassembly.as_ref().unwrap().this_map();
         let i = cpu.current;
         let pc = if i.is_none() {
             Vectors::RESET as u16

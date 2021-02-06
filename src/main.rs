@@ -1,5 +1,4 @@
 #![feature(get_mut_unchecked)]
-// #![allow(dead_code)]
 
 extern crate lazy_static;
 extern crate log;
@@ -16,7 +15,7 @@ use olc_pixel_game_engine as olc;
 use cart::cart::Cartridge;
 use cpu::mos6502::*;
 use nes::nes::Nes;
-use vis::visuals::{GuiMonitor, MonitorPOV};
+use vis::visuals::{GuiMonitor, Layouts};
 
 mod apu;
 mod cart;
@@ -51,8 +50,8 @@ fn main() {
 
     let mut monitor = GuiMonitor {
         nes,
-        pov: MonitorPOV::PictureView,
-        disassemble: None,
+        curr_layout: Layouts::Game,
+        disassembly: None,
         in_stepping_mode: false,
         extra_time: 0.,
     };

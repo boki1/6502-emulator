@@ -77,7 +77,7 @@ impl Nes {
 
     pub fn sys_clock(&mut self) {
         println!("PPU frame render");
-        self.ppu_mut().frame();
+        self.ppu_mut().full_frame();
 
         if self.sys_clocks % 3 == 0 {
             println!("CPU clock tick");
@@ -109,6 +109,9 @@ impl Nes {
     pub fn apu_mut(&mut self) -> &'_ mut Apu {
         &mut self.apu
     }
+
+    // TODO:
+    // Fix mutable borrow bug
 
     // pub fn cart(&self) -> Option<&'_ Cartridge> {
     //     if let Some(__cart) = self.cartridge {

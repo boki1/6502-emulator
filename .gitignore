@@ -4,3 +4,6 @@ scripts/autogen
 imgs/
 .idea/
 config/
+
+output.log
+memdump.txt
