@@ -151,7 +151,7 @@ impl Nes {
             }
         }
 
-        if !cart_handle {
+        if cart_handle == false {
             // The first check is implied by the type limit.
             // ''' addr >= RAM_BEGIN &&  '''
             if addr <= RAM_END {
@@ -176,7 +176,7 @@ impl Nes {
             cart_handle = true;
         }
 
-        if !cart_handle {
+        if cart_handle == false {
             // The first check is implied by the type limit.
             // ''' addr >= RAM_BEGIN &&  '''
             if addr <= RAM_END {

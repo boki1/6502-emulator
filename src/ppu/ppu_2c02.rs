@@ -4,17 +4,30 @@ use std::rc::Rc;
 
 use olc_pixel_game_engine::{Pixel, Sprite};
 
-use crate::cart::cart::Cartridge;
+use crate::cart::cart::{Cartridge, MirrorKind};
 use crate::nes::nes::{Nes, NesComponent, PPU_MIRROR, PPU_RANGE_BEGIN, PPU_RANGE_END};
 
+// Screen limits
 const HORIZONTAL_LIMIT: i32 = 340;
 const VERTICAL_LIMIT: i32 = 260;
 
 const WIDTH: i32 = 256;
 const HEIGHT: i32 = 240;
+//
+
+// PPU memory map
+const PATTERN_TABLES_BEGIN: u16 = 0x0000;
+const PATTERN_TABLES_END: u16 = 0x1fff;
+
+const NAMETABLES_BEGIN: u16 = 0x2000;
+const NAMETABLES_END: u16 = 0x3eff;
+const SINGLE_NAMETABLE_SIZE: u16 = 0x0400;
 
 const PALETTE_RANGE_BEGIN: u16 = 0x3f00;
+const PALETTE_RANGE_END: u16 = 0x3fff;
+//
 
+// PPU registers
 const PPUCTRL: u16 = 0x2000;
 const PPUMASK: u16 = 0x2001;
 const PPUSTATUS: u16 = 0x2002;
@@ -23,6 +36,7 @@ const OAMDATA: u16 = 0x2004;
 const PPUSCROLL: u16 = 0x2005;
 const PPUADDR: u16 = 0x2006;
 const PPUDATA: u16 = 0x2007;
+//
 
 /// Example:
 /// #[inline]
@@ -345,16 +359,18 @@ enum AddrLatch {
 pub struct Ppu {
     /// Connections
     container: Option<Rc<RefCell<Nes>>>,
-    cart: Option<Rc<Cartridge>>,
+    cart: Option<Rc<RefCell<Cartridge>>>,
 
     /// Ppu bus
-    pattern_mem: [u8; 8 * 1024],
-    vram: [u8; 2 * 1024],
-    palette_mem: [u8; 32],
+    pattern_table: [u8; 8 * 1024],
+    nametable: [u8; 2 * 1024],
+    palette: [u8; 32],
+
+    // Graphics
+    screen: Sprite,
     colours: [Pixel; 64],
 
     /// Internal states
-    screen: Sprite,
     reg_set: PpuRegSet,
     frame_end: bool,
 
@@ -390,13 +406,13 @@ impl NesComponent for Ppu {
 }
 
 impl Ppu {
-    pub fn new(cart: Option<Rc<Cartridge>>) -> Self {
+    pub fn new(cart: Option<Rc<RefCell<Cartridge>>>) -> Self {
         Ppu {
             container: None,
             cart,
-            pattern_mem: [0; 8 * 1024],
-            vram: [0; 2 * 1024],
-            palette_mem: [0; 32],
+            pattern_table: [0; 8 * 1024],
+            nametable: [0; 2 * 1024],
+            palette: [0; 32],
             screen: Sprite::with_dims(WIDTH, HEIGHT),
             frame_end: false,
             data_buffer: 0,
@@ -487,9 +503,106 @@ impl Ppu {
         &mut self.reg_set.dot
     }
 
-    /// Write to PPU/secondary bus
-    pub fn write(&mut self, addr: u16, _val: u8) {
-        let _valid_addr = addr & 0x3fff;
+    /// Read from secondary bus
+    pub fn read(&self, mut addr: u16) -> u8 {
+        addr &= PPU_RANGE_END;
+
+        let mut cart_handle: bool = false;
+
+        if let Some(cart) = &self.cart {
+            if let Some(read_from_cart) = cart.borrow_mut().chr_mem_read(addr) {
+                cart_handle = true;
+                return read_from_cart;
+            }
+        }
+
+        let mut data: u8 = 0;
+        if addr >= PATTERN_TABLES_BEGIN && addr <= PATTERN_TABLES_END {
+            data = self.pattern_table[addr as usize];
+        } else if addr >= NAMETABLES_BEGIN && addr <= NAMETABLES_END {
+            data = self.read_from_nametable(addr);
+        } else if addr >= PALETTE_RANGE_BEGIN && addr <= PALETTE_RANGE_END {
+            data = self.read_from_palette(addr);
+        }
+
+        data
+    }
+
+    /// Write to secondary bus
+    pub fn write(&mut self, mut addr: u16, value: u8) {
+        addr &= PPU_RANGE_END;
+        let mut cart_handle: bool = false;
+
+        if let Some(cart) = &self.cart {
+            cart.borrow_mut().chr_mem_writ(addr, value);
+            cart_handle = true;
+            return;
+        }
+
+        if addr >= PATTERN_TABLES_BEGIN && addr <= PATTERN_TABLES_END {
+            self.pattern_table[addr as usize] = value;
+        } else if addr >= NAMETABLES_BEGIN && addr <= NAMETABLES_END {
+            self.write_to_nametable(addr, value);
+        } else if addr >= PALETTE_RANGE_BEGIN && addr <= PALETTE_RANGE_END {
+            self.write_to_palette(addr, value);
+        }
+    }
+
+    fn locate_in_palette(&self, mut addr: u16) -> u16 {
+        addr &= 0x001f;
+        match addr {
+            0x10 => addr = 0x0,
+            0x14 => addr = 0x4,
+            0x18 => addr = 0x8,
+            0x1c => addr = 0xc,
+            _ => {}
+        };
+
+        addr
+    }
+
+    fn read_from_palette(&self, mut addr: u16) -> u8 {
+        addr = self.locate_in_palette(addr);
+        self.palette[addr as usize]
+            & if self.mask().grayscale_enabled() {
+                0x30
+            } else {
+                0x3f
+            }
+    }
+
+    fn write_to_palette(&mut self, mut addr: u16, data: u8) {
+        addr = self.locate_in_palette(addr);
+        self.palette[addr as usize] = data;
+    }
+
+    fn locate_in_nametable(&self, mut addr: u16) -> u16 {
+        addr &= 0xffff;
+
+        if let Some(cart) = &self.cart {
+            let cart_ref = cart.borrow();
+            let coeffs: Vec<u16> = match cart_ref.mirror {
+                MirrorKind::Horizontal => vec![0, 0, 1, 1],
+                MirrorKind::Vertical => vec![0, 1, 0, 1],
+            };
+
+            let inner = addr & 0x3fff;
+            let idx = (addr - NAMETABLES_BEGIN) / SINGLE_NAMETABLE_SIZE;
+            let coeff = coeffs[idx as usize];
+            return inner + coeff * (SINGLE_NAMETABLE_SIZE * 2);
+        }
+
+        unreachable!();
+    }
+
+    fn read_from_nametable(&self, mut addr: u16) -> u8 {
+        addr = self.locate_in_nametable(addr);
+        self.nametable[addr as usize]
+    }
+
+    fn write_to_nametable(&mut self, mut addr: u16, data: u8) {
+        addr = self.locate_in_nametable(addr);
+        self.nametable[addr as usize] = data;
     }
 
     #[inline]
@@ -505,7 +618,7 @@ impl Ppu {
     reg_getter!(status, status_reg, PpuStatus);
     reg_setter!(status_mut, status_reg, PpuStatus);
 
-    reg_getter!(maks, mask_reg, PpuMask);
+    reg_getter!(mask, mask_reg, PpuMask);
     reg_setter!(mask_mut, mask_reg, PpuMask);
 
     reg_getter!(control, control_reg, PpuCtrl);
@@ -564,7 +677,7 @@ impl Ppu {
     }
 
     fn read_data_v_loopy_reg(&mut self, addr: u16) -> u8 {
-        let mut data: u8 = 0;
+        let mut data: u8;
         data = self.data_buffer;
         self.data_buffer = self.read(self.v_addr().0);
 
@@ -585,14 +698,6 @@ impl Ppu {
         let nt_y = self.control().nametbl_y() as u16;
         self.t_addr_mut().nametbl_x_set(nt_x);
         self.t_addr_mut().nametbl_y_set(nt_y);
-    }
-
-    /// Read from PPU/secondary bus
-    pub fn read(&self, addr: u16) -> u8 {
-        let _valid_addr = addr & 0x3fff;
-        let data = 0;
-
-        data
     }
 
     /// Write to main bus

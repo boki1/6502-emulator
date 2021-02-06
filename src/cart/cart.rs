@@ -16,11 +16,11 @@ pub struct Cartridge {
     prog_chunks: u16,
     char_chunks: u16,
     mapper_id: u8,
-    mirror: MirrorKind,
+    pub mirror: MirrorKind,
     is_valid: bool,
 }
 
-enum MirrorKind {
+pub enum MirrorKind {
     Horizontal,
     Vertical,
 }
@@ -134,7 +134,7 @@ impl Cartridge {
         self_
     }
 
-    pub fn is_ok(&self) -> bool {
+    pub fn _is_ok(&self) -> bool {
         self.is_valid
     }
 
