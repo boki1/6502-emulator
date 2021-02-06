@@ -161,7 +161,7 @@ impl Nes {
             } else if addr >= CONTROLLER_RANGE_BEGIN && addr <= CONTROLLER_RANGE_END {
                 // TODO:
                 // Implement controller sensitivity
-                todo!();
+                // todo!();
             }
         }
 

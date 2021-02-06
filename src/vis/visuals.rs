@@ -74,7 +74,7 @@ impl GuiMonitor<'_> {
                 self.display_controller_state(100, 20)?;
             }
             PaletteAndPattern => {
-                self.display_pattern_with_palette(50, 50)?;
+                self.display_pattern_with_palette(0, 0)?;
             }
             Disassembly => {
                 self.display_code(150, 50)?;
@@ -169,8 +169,34 @@ impl GuiMonitor<'_> {
     }
 
     pub fn display_pattern_with_palette(&self, x: i32, y: i32) -> Result<(), olc::Error> {
-        // TODO:
-        unimplemented!();
+        const PALETTE_LIMIT: i32 = 8;
+        let chosen: i32 = 3;
+        for palette_idx in 0..PALETTE_LIMIT {
+            for idx in 0..4 {
+                olc::fill_rect(
+                    50 + x + palette_idx * (chosen * 5) + idx * chosen,
+                    20 + y,
+                    chosen,
+                    chosen,
+                    self.nes
+                        .ppu()
+                        .map_pixel_to_color(palette_idx as u16, idx as u8),
+                );
+            }
+        }
+
+        olc::draw_sprite(
+            x,
+            y + 30,
+            &self.nes.ppu().get_drawable_pattern(0, chosen as u16),
+        );
+        olc::draw_sprite(
+            x + 130,
+            y + 30,
+            &self.nes.ppu().get_drawable_pattern(1, chosen as u16),
+        );
+
+        Ok(())
     }
 
     pub fn display_controller_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {

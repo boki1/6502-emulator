@@ -50,9 +50,9 @@ fn main() {
 
     let mut monitor = GuiMonitor {
         nes,
-        curr_layout: Layouts::Game,
+        curr_layout: Layouts::PaletteAndPattern,
         disassembly: None,
-        in_stepping_mode: false,
+        in_stepping_mode: true,
         extra_time: 0.,
     };
 

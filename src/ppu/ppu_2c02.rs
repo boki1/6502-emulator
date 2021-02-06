@@ -711,7 +711,7 @@ impl Ppu {
             PPUSCROLL => self.addr_latch = self.scroll_t_loopy_reg(value),
             PPUADDR => self.addr_latch = self.write_addr_t_loopy_reg(value),
             PPUDATA => self.write_data_v_loopy_reg(value),
-            _ => unreachable!(),
+            _ => {}
         }
     }
 
@@ -731,7 +731,7 @@ impl Ppu {
             PPUSCROLL => { /* unreadable */ }
             PPUADDR => { /* unreadable */ }
             PPUDATA => data = self.read_data_v_loopy_reg(addr),
-            _ => unreachable!(),
+            _ => {}
         }
 
         data
@@ -763,5 +763,47 @@ impl Ppu {
 
     pub fn screen(&self) -> &Sprite {
         &self.screen
+    }
+
+    pub fn map_pixel_to_color(&self, palette_idx: u16, pixel: u8) -> Pixel {
+        let colour_idx = self.read(PALETTE_RANGE_BEGIN + palette_idx * 4 + pixel as u16);
+        self.colours[(colour_idx & 0x3f) as usize]
+    }
+
+    pub fn get_drawable_pattern(&self, pattern_tbl_idx: u16, palette_idx: u16) -> Sprite {
+        let mut mem_offset: u16;
+        let mut pattern_table_disp = Sprite::with_dims(128, 128);
+        let mut pixel: u8;
+        let mut lsb: u8;
+        let mut msb: u8;
+        let mut color: Pixel;
+
+        const PIXELS_IN_SINGLE_TILE: u16 = 8;
+        const TILES: u16 = 16;
+
+        for tile_x in 0..TILES {
+            for tile_y in 0..TILES {
+                mem_offset = (tile_x * TILES + tile_y) * 16;
+                for px_row in 0..PIXELS_IN_SINGLE_TILE {
+                    lsb = self.read(pattern_tbl_idx * 0x1000 + mem_offset + px_row);
+                    msb = self.read(pattern_tbl_idx * 0x1000 + mem_offset + px_row + 8);
+
+                    for px_col in 0..PIXELS_IN_SINGLE_TILE {
+                        pixel = (lsb & 1) | (msb & 1);
+                        lsb >>= 1;
+                        msb >>= 1;
+
+                        color = self.map_pixel_to_color(palette_idx, pixel);
+                        pattern_table_disp.set_pixel(
+                            (tile_x * 8 + (7 - px_col)) as i32,
+                            (tile_y * 8 + px_row) as i32,
+                            color,
+                        );
+                    }
+                }
+            }
+        }
+
+        pattern_table_disp
     }
 }
