@@ -178,14 +178,14 @@ impl Cpu {
 
     /// Given a mutable reference to an address, make two consecutive reads and update the address
     /// respectively.
-    pub fn read_word_and_inc(&self, addr: &mut u16) -> u16 {
+    pub fn read_word_and_inc(&mut self, addr: &mut u16) -> u16 {
         let lo = self.read_and_inc(addr);
         let hi = self.read_and_inc(addr);
         u16::from_le_bytes([lo, hi])
     }
 
     /// Given a mutable reference to an address, make a read and update the address.
-    pub fn read_and_inc(&self, addr: &mut u16) -> u8 {
+    pub fn read_and_inc(&mut self, addr: &mut u16) -> u8 {
         let lo = self.read_bus(*addr);
         *addr += 1;
         lo
@@ -208,8 +208,8 @@ impl Cpu {
 
     /// Given an address to read from make the read and return the value _without_ updating any
     /// other value.
-    pub fn read_bus(&self, addr: u16) -> u8 {
-        let cont = self.container_of();
+    pub fn read_bus(&mut self, addr: u16) -> u8 {
+        let cont = self.container_of_mut();
         let val = cont.read(addr);
         val
     }
@@ -476,7 +476,7 @@ impl Cpu {
 
     /// Given a staring and ending address, disasseble the region.
     /// Returns a `Asm` structure.
-    pub fn disassemble_region(&self, begin: u16, end: u16) -> Asm {
+    pub fn disassemble_region(&mut self, begin: u16, end: u16) -> Asm {
         use AddrMode::*;
 
         let mut code_map: HashMap<u16, Box<String>> = HashMap::new();

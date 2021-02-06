@@ -29,7 +29,7 @@ impl olc::Application for GuiMonitor<'_> {
         Ok(())
     }
 
-    fn on_user_update(&mut self, elapsed_time: f32) -> Result<(), olc::Error> {
+    fn on_user_update(&mut self, _elapsed_time: f32) -> Result<(), olc::Error> {
         use olc::{get_key, Key::*};
 
         olc::clear(olc::BLACK);
@@ -41,7 +41,7 @@ impl olc::Application for GuiMonitor<'_> {
             self.nes.sys_clock();
         }
 
-        self.display_curr_layout();
+        self.display_curr_layout()?;
         // self.handle_controller_input();
 
         if get_key(SPACE).pressed {
@@ -61,29 +61,31 @@ impl olc::Application for GuiMonitor<'_> {
 }
 
 impl GuiMonitor<'_> {
-    fn display_curr_layout(&self) {
+    fn display_curr_layout(&mut self) -> Result<(), olc::Error> {
         use Layouts::*;
         match self.curr_layout {
             RAM => {
-                self.display_mem(50, 50, 0x0, 16, 16);
-                self.display_mem(50, 270, 0x8000, 16, 16);
+                self.display_mem(50, 50, 0x0, 16, 16)?;
+                self.display_mem(50, 270, 0x8000, 16, 16)?;
             }
             Internals => {
-                self.display_cpu_state(20, 20);
-                self.display_ppu_state(60, 20);
-                self.display_controller_state(100, 20);
+                self.display_cpu_state(20, 20)?;
+                self.display_ppu_state(60, 20)?;
+                self.display_controller_state(100, 20)?;
             }
             PaletteAndPattern => {
-                self.display_pattern_with_palette(50, 50);
+                self.display_pattern_with_palette(50, 50)?;
             }
             Disassembly => {
-                self.display_code(150, 50);
+                self.display_code(150, 50)?;
             }
             Game => {
                 self.display_game(2, 2);
             }
             Help => {}
         }
+
+        Ok(())
     }
 
     fn handle_layout_input(&mut self) {
@@ -141,14 +143,14 @@ impl GuiMonitor<'_> {
     }
 
     pub fn display_mem(
-        &self,
+        &mut self,
         x_begin: i32,
         y_begin: i32,
         addr_begin: u16,
         rows: u16,
         cols: u16,
     ) -> Result<(), olc::Error> {
-        let cpu = self.nes.cpu();
+        let cpu = self.nes.cpu_mut();
         let mut disp_addr: String;
         let mut addr: u16 = addr_begin;
         let x: i32 = x_begin;

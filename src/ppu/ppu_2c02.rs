@@ -5,14 +5,30 @@ use std::rc::Rc;
 use olc_pixel_game_engine::{Pixel, Sprite};
 
 use crate::cart::cart::Cartridge;
-use crate::nes::nes::{Nes, NesComponent};
+use crate::nes::nes::{Nes, NesComponent, PPU_MIRROR, PPU_RANGE_BEGIN, PPU_RANGE_END};
 
 const HORIZONTAL_LIMIT: i32 = 340;
 const VERTICAL_LIMIT: i32 = 260;
 
-pub const WIDTH: i32 = 256;
-pub const HEIGHT: i32 = 240;
+const WIDTH: i32 = 256;
+const HEIGHT: i32 = 240;
 
+const PALETTE_RANGE_BEGIN: u16 = 0x3f00;
+
+const PPUCTRL: u16 = 0x2000;
+const PPUMASK: u16 = 0x2001;
+const PPUSTATUS: u16 = 0x2002;
+const OAMADDR: u16 = 0x2003;
+const OAMDATA: u16 = 0x2004;
+const PPUSCROLL: u16 = 0x2005;
+const PPUADDR: u16 = 0x2006;
+const PPUDATA: u16 = 0x2007;
+
+/// Example:
+/// #[inline]
+/// fn vblank(&self) -> bool {
+///     (self.0 & 1 << 7)) != 0;
+/// }
 macro_rules! bit {
     ($n: expr, $name: ident) => {
         #[inline]
@@ -22,11 +38,44 @@ macro_rules! bit {
     };
 }
 
+/// Example:
+/// #[inline]
+/// fn vblank(&self, value: bool) -> bool {
+///     self.0 = (self.0 & !(1 << 7)) | ((value as u8) << 7);
+/// }
 macro_rules! bit_setter {
     ($n: expr, $name: ident) => {
         #[inline]
         fn $name(&mut self, value: bool) {
             self.0 = (self.0 & !(1 << $n)) | ((value as u8) << $n);
+        }
+    };
+}
+
+/// Example:
+/// #[inline]
+/// fn status_reg(&self) -> &PpuStatus {
+///     &self.reg_set.status_reg
+/// }
+macro_rules! reg_getter {
+    ($name: ident, $field: ident, $type: ty) => {
+        #[inline]
+        fn $name(&self) -> &$type {
+            &self.reg_set.$field
+        }
+    };
+}
+
+/// Example:
+/// #[inline]
+/// fn status_mut(&mut self) -> &mut PpuStatus {
+///     &mut self.reg_set.status_reg
+/// }
+macro_rules! reg_setter {
+    ($name: ident, $field: ident, $type: ty) => {
+        #[inline]
+        fn $name(&mut self) -> &mut $type {
+            &mut self.reg_set.$field
         }
     };
 }
@@ -67,6 +116,8 @@ impl PpuMask {
         self.0 = 0;
     }
 
+    fn observe(&mut self) {}
+
     bit!(0, grayscale_enabled);
     bit!(1, render_bg_left);
     bit!(2, render_fg_left);
@@ -87,6 +138,13 @@ impl PpuStatus {
 
     fn reset(&mut self) {
         self.0 = 0;
+    }
+
+    fn observe(&mut self) -> u8 {
+        let data: u8 = self.0 & 0b1110_0000;
+        self.set_vblank(false);
+
+        data
     }
 
     // First 5 bits are unused
@@ -154,11 +212,55 @@ impl PpuDot {
     }
 }
 
+/// This is the structure of the so-called loopy register.
+/// Check the [nesdev wiki](https://wiki.nesdev.com/w/index.php/PPU_scrolling#PPU_internal_registers) for  more details.
+/// ```
+/// yyy NN YYYYY XXXXX
+/// ||| || ||||| +++++-- coarse X scroll
+/// ||| || +++++-------- coarse Y scroll
+/// ||| ++-------------- nametable select
+/// +++----------------- fine Y scroll
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct LoopyReg(u16);
+
+impl LoopyReg {
+    fn new() -> Self {
+        Self(0)
+    }
+
+    fn set(&mut self, value: u16) {
+        self.0 = value;
+    }
+
+    fn coarse_x(&self) -> u16 {
+        self.0 & 0b0000_0000_0001_1111
+    }
+
+    fn coarse_y(&self) -> u16 {
+        self.0 & 0b0000_0011_1110_0000
+    }
+
+    fn nametbl_x(&self) -> u16 {
+        self.0 & 0b0000_0100_0000_0000
+    }
+
+    fn nametbl_y(&self) -> u16 {
+        self.0 & 0b0000_1000_0000_0000
+    }
+
+    fn fine_y(&self) -> u16 {
+        self.0 & 0b0111_0000_0000_0000
+    }
+}
+
 pub struct PpuRegSet {
     control_reg: PpuCtrl,
     mask_reg: PpuMask,
     status_reg: PpuStatus,
     dot: PpuDot,
+    t_addr: LoopyReg,
+    v_addr: LoopyReg,
 }
 
 impl PpuRegSet {
@@ -168,6 +270,8 @@ impl PpuRegSet {
             status_reg: PpuStatus::new(),
             mask_reg: PpuMask::new(),
             control_reg: PpuCtrl::new(),
+            t_addr: LoopyReg::new(),
+            v_addr: LoopyReg::new(),
         }
     }
 
@@ -195,6 +299,10 @@ pub struct Ppu {
     screen: Sprite,
     reg_set: PpuRegSet,
     frame_end: bool,
+
+    fine_x: u8,
+    data_buffer: u8,
+    addr_latch: bool,
 }
 
 impl std::fmt::Debug for Ppu {
@@ -233,6 +341,9 @@ impl Ppu {
             palette_mem: [0; 32],
             screen: Sprite::with_dims(WIDTH, HEIGHT),
             frame_end: false,
+            data_buffer: 0,
+            addr_latch: false,
+            fine_x: 0,
             reg_set: PpuRegSet::new(),
             colours: [
                 Pixel::rgb(84, 84, 84),
@@ -333,6 +444,21 @@ impl Ppu {
         self.frame_end = false;
     }
 
+    reg_getter!(status, status_reg, PpuStatus);
+    reg_setter!(status_mut, status_reg, PpuStatus);
+
+    reg_getter!(maks, mask_reg, PpuMask);
+    reg_setter!(mask_mut, mask_reg, PpuMask);
+
+    reg_getter!(control, control_reg, PpuCtrl);
+    reg_setter!(control_mut, control_reg, PpuCtrl);
+
+    reg_getter!(v_addr, v_addr, LoopyReg);
+    reg_setter!(v_addr_mut, v_addr, LoopyReg);
+
+    reg_getter!(t_addr, t_addr, LoopyReg);
+    reg_setter!(t_addr_mut, t_addr, LoopyReg);
+
     /// Read from PPU/secondary bus
     pub fn read(&self, addr: u16) -> u8 {
         let _valid_addr = addr & 0x3fff;
@@ -342,11 +468,57 @@ impl Ppu {
     }
 
     /// Write to main bus
-    pub fn poke_main(&mut self, _addr: u16, _val: u8) {}
+    pub fn poke_main(&mut self, addr: u16, _val: u8) {
+        match addr {
+            PPUCTRL => { /* unreadable */ }
+            PPUMASK => { /* unreadable */ }
+            PPUSTATUS => { /* unreadable */ }
+            OAMADDR => { /* unreadable */ }
+            OAMDATA => { /* unreadable */ }
+            PPUSCROLL => { /* unreadable */ }
+            PPUADDR => { /* unreadable */ }
+            PPUDATA => { /* unreadable */ }
+            _ => {
+                // Should not come here.
+                unreachable!();
+            }
+        }
+    }
 
     /// Read from main bus
-    pub fn peek_main(&mut self, _addr: u16) -> u8 {
-        0
+    pub fn peek_main(&mut self, addr: u16) -> u8 {
+        let mut data: u8 = 0;
+
+        match addr {
+            PPUCTRL => { /* unreadable */ }
+            PPUMASK => { /* unreadable */ }
+            PPUSTATUS => {
+                data = self.status_mut().observe();
+                self.addr_latch = false;
+            }
+            OAMADDR => { /* unreadable */ }
+            OAMDATA => { /* unreadable */ }
+            PPUSCROLL => { /* unreadable */ }
+            PPUADDR => { /* unreadable */ }
+            PPUDATA => {
+                data = self.data_buffer;
+                self.data_buffer = self.read(self.v_addr().0);
+
+                if addr >= PALETTE_RANGE_BEGIN {
+                    data = self.data_buffer;
+                }
+
+                let big_increment: bool = self.control().vram_increment_mode();
+                let v_addr_new: u16 = self.v_addr().0 + if big_increment { 32 } else { 1 };
+                self.v_addr_mut().set(v_addr_new);
+            }
+            _ => {
+                // Should not come here.
+                unreachable!();
+            }
+        }
+
+        data
     }
 
     pub fn clock(&mut self) {

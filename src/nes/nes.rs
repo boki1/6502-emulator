@@ -8,6 +8,14 @@ use crate::ppu::ppu_2c02::Ppu;
 
 pub const RAM_BEGIN: u16 = 0x00;
 pub const RAM_END: u16 = 0x1fff;
+pub const RAM_MIRROR: u16 = 0x07ff;
+
+pub const PPU_RANGE_BEGIN: u16 = 0x2000;
+pub const PPU_RANGE_END: u16 = 0x3fff;
+pub const PPU_MIRROR: u16 = 0x7;
+
+pub const CONTROLLER_RANGE_BEGIN: u16 = 0x4016;
+pub const CONTROLLER_RANGE_END: u16 = 0x4017;
 
 pub struct Nes {
     pub cpu: Cpu,
@@ -111,18 +119,18 @@ impl Nes {
     }
 
     // TODO:
-    // Fix mutable borrow bug
-
     // pub fn cart(&self) -> Option<&'_ Cartridge> {
-    //     if let Some(__cart) = self.cartridge {
-    //         return Some(__cart.get_mut());
-    //     }
+    //     // if let Some(cart) = &self.cartridge {
+    //     //     return Some(&(*cart).borrow());
+    //     // }
     //     None
     // }
     //
     // pub fn cart_mut(&mut self) -> Option<&'_ mut Cartridge> {
-    //     if let Some(__cart) = self.cartridge {
-    //         return Some(__cart.get_mut());
+    //     if let Some(mut cart) = &self.cartridge {
+    //         if let Some(cart_ref) = Rc::get_mut(&mut cart) {
+    //             return Some(cart_ref.get_mut());
+    //         }
     //     }
     //     None
     // }
@@ -130,7 +138,9 @@ impl Nes {
 
 impl Nes {
     /// Initiate read from the main nes bus (or cartridge).
-    pub fn read(&self, addr: u16) -> u8 {
+    /// When the CPU and the PPU communicate, the PPU's registers update their values. Hence this
+    /// method needs a mutable reference.
+    pub fn read(&mut self, addr: u16) -> u8 {
         let mut read: u8 = 0;
         let mut cart_handle: bool = false;
 
@@ -142,25 +152,41 @@ impl Nes {
         }
 
         if !cart_handle {
-            if addr <= 0x1fff {
-                read = self.ram[(addr & 0x07ff) as usize];
+            // The first check is implied by the type limit.
+            // ''' addr >= RAM_BEGIN &&  '''
+            if addr <= RAM_END {
+                read = self.ram[(addr & RAM_MIRROR) as usize];
+            } else if addr >= PPU_RANGE_BEGIN && addr <= PPU_RANGE_END {
+                read = self.ppu_mut().peek_main(addr & PPU_MIRROR);
+            } else if addr >= CONTROLLER_RANGE_BEGIN && addr <= CONTROLLER_RANGE_END {
+                // TODO:
+                // Implement controller sensitivity
+                todo!();
             }
         }
+
         return read;
     }
 
     /// Initiate write to the main nes bus (or cartridge).
     pub fn write(&mut self, addr: u16, data: u8) {
         let mut cart_handle: bool = false;
-        // if let Some(cart) = self.cart_mut() {
         if let Some(cart) = &mut self.cartridge {
             cart.borrow_mut().prg_mem_writ(addr, data);
             cart_handle = true;
         }
 
         if !cart_handle {
-            if addr <= 0x1fff {
-                self.ram[(addr & 0x07ff) as usize] = data;
+            // The first check is implied by the type limit.
+            // ''' addr >= RAM_BEGIN &&  '''
+            if addr <= RAM_END {
+                self.ram[(addr & RAM_MIRROR) as usize] = data;
+            } else if addr >= PPU_RANGE_BEGIN && addr <= PPU_RANGE_END {
+                self.ppu_mut().poke_main(addr & PPU_MIRROR, data);
+            } else if addr >= CONTROLLER_RANGE_BEGIN && addr <= CONTROLLER_RANGE_END {
+                // TODO:
+                // Implement controller sensitivity
+                todo!();
             }
         }
     }
