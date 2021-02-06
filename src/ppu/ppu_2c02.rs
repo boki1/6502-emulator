@@ -80,6 +80,69 @@ macro_rules! reg_setter {
     };
 }
 
+/// Utility helper function.
+/// Example:
+/// bitseq(0b1000_0000_0000_0000, 15, 1) -> 1
+fn bitseq_get(value: u16, offset: u16, len: u16) -> u16 {
+    let mut res: u16 = 0;
+    let mut mask: u16 = 1 << offset;
+    let mut c = 0;
+    while c < len {
+        res |= value & mask;
+        mask <<= 1;
+        c += 1;
+    }
+
+    res
+}
+
+/// Utility helper function.
+/// Example:
+/// bitseq_set(0b1000_0000_0000_0000, 0, 0b1111, 4) -> 0b1000_0000_0000_1111
+fn bitseq_set(mut value: u16, offset: u16, subvalue: u16, bitlen: u16) -> u16 {
+    let mut mask = 1 << offset;
+    let mut mask_sub = 1;
+    let mut c = 0;
+    while c < bitlen {
+        value &= !mask;
+        value |= (((subvalue & mask_sub) > 0) as u16) << (offset + c);
+        mask <<= 1;
+        mask_sub <<= 1;
+        c += 1;
+    }
+
+    value
+}
+
+/// Example:
+/// #[inline]
+/// fn unused(&self) -> u16 {
+///    self.0 & 0b1000_0000_0000_0000
+/// }
+///
+/// fn unused_set(&mut self, value: u16) -> u16 {
+///     self.0 = (self.0 & !())
+//  self.0 = (self.0 & !(1 << $n)) | ((value as u8) << $n);
+/// }
+
+macro_rules! bitseq {
+    ($offset: expr, $bitlen: expr, $name: ident) => {
+        #[inline]
+        fn $name(&self) -> u16 {
+            bitseq_get(self.0, $offset, $bitlen)
+        }
+    };
+}
+
+macro_rules! bitseq_setter {
+    ($offset: expr, $bitlen: expr, $name: ident) => {
+        #[inline]
+        fn $name(&mut self, value: u16) -> u16 {
+            bitseq_set(self.0, $offset, value, $bitlen)
+        }
+    };
+}
+
 /// Registers
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
 struct PpuCtrl(u8);
@@ -89,14 +152,14 @@ impl PpuCtrl {
         Self(0)
     }
 
-    fn reset(&mut self) {
-        self.0 = 0;
+    fn set(&mut self, value: u8) {
+        self.0 = value;
     }
 
     // Getters for the bit flags
     bit!(0, nametbl_x);
     bit!(1, nametbl_y);
-    bit!(2, vram_increment_mode);
+    bit!(2, vertical_inc_mode);
     bit!(3, pattern_tbl_fg);
     bit!(4, pattern_tbl_bg);
     bit!(5, big_foreground);
@@ -112,11 +175,9 @@ impl PpuMask {
         Self(0)
     }
 
-    fn reset(&mut self) {
-        self.0 = 0;
+    fn set(&mut self, value: u8) {
+        self.0 = value;
     }
-
-    fn observe(&mut self) {}
 
     bit!(0, grayscale_enabled);
     bit!(1, render_bg_left);
@@ -136,8 +197,8 @@ impl PpuStatus {
         Self(0)
     }
 
-    fn reset(&mut self) {
-        self.0 = 0;
+    fn set(&mut self, value: u8) {
+        self.0 = value;
     }
 
     fn observe(&mut self) -> u8 {
@@ -229,28 +290,20 @@ impl LoopyReg {
         Self(0)
     }
 
+    bitseq!(0, 5, coarse_x);
+    bitseq!(5, 5, coarse_y);
+    bitseq!(10, 1, nametbl_x);
+    bitseq!(11, 1, nametbl_y);
+    bitseq!(12, 3, fine_y);
+
+    bitseq_setter!(0, 5, coarse_x_set);
+    bitseq_setter!(5, 5, coarse_y_set);
+    bitseq_setter!(10, 1, nametbl_x_set);
+    bitseq_setter!(11, 1, nametbl_y_set);
+    bitseq_setter!(12, 3, fine_y_set);
+
     fn set(&mut self, value: u16) {
         self.0 = value;
-    }
-
-    fn coarse_x(&self) -> u16 {
-        self.0 & 0b0000_0000_0001_1111
-    }
-
-    fn coarse_y(&self) -> u16 {
-        self.0 & 0b0000_0011_1110_0000
-    }
-
-    fn nametbl_x(&self) -> u16 {
-        self.0 & 0b0000_0100_0000_0000
-    }
-
-    fn nametbl_y(&self) -> u16 {
-        self.0 & 0b0000_1000_0000_0000
-    }
-
-    fn fine_y(&self) -> u16 {
-        self.0 & 0b0111_0000_0000_0000
     }
 }
 
@@ -276,11 +329,16 @@ impl PpuRegSet {
     }
 
     pub fn reset(&mut self) {
-        self.control_reg.reset();
-        self.mask_reg.reset();
-        self.status_reg.reset();
+        self.control_reg.set(0);
+        self.mask_reg.set(0);
+        self.status_reg.set(0);
         self.dot.reset();
     }
+}
+
+enum AddrLatch {
+    FirstWrite,
+    SecondWrite,
 }
 
 /// The Picture processing unit
@@ -302,7 +360,7 @@ pub struct Ppu {
 
     fine_x: u8,
     data_buffer: u8,
-    addr_latch: bool,
+    addr_latch: AddrLatch,
 }
 
 impl std::fmt::Debug for Ppu {
@@ -342,7 +400,7 @@ impl Ppu {
             screen: Sprite::with_dims(WIDTH, HEIGHT),
             frame_end: false,
             data_buffer: 0,
-            addr_latch: false,
+            addr_latch: AddrLatch::FirstWrite,
             fine_x: 0,
             reg_set: PpuRegSet::new(),
             colours: [
@@ -459,6 +517,76 @@ impl Ppu {
     reg_getter!(t_addr, t_addr, LoopyReg);
     reg_setter!(t_addr_mut, t_addr, LoopyReg);
 
+    fn scroll_t_loopy_reg(&mut self, value: u8) -> AddrLatch {
+        let value_16 = value as u16;
+        match &self.addr_latch {
+            AddrLatch::FirstWrite => {
+                self.fine_x = value & 0b0111;
+                self.t_addr_mut().coarse_x_set(value_16 >> 3);
+                return AddrLatch::SecondWrite;
+            }
+            AddrLatch::SecondWrite => {
+                self.t_addr_mut().fine_y_set(value_16 & 0b0111);
+                self.t_addr_mut().coarse_y_set(value_16 >> 3);
+                return AddrLatch::FirstWrite;
+            }
+        }
+
+        unreachable!();
+    }
+
+    fn write_addr_t_loopy_reg(&mut self, value: u8) -> AddrLatch {
+        let value_16 = value as u16;
+        let temp: u16 = self.t_addr().0;
+        match &self.addr_latch {
+            AddrLatch::FirstWrite => {
+                self.t_addr_mut()
+                    .set((value_16 & 0b00111111 << 8) | (temp & 0x00ff));
+                return AddrLatch::SecondWrite;
+            }
+            AddrLatch::SecondWrite => {
+                self.t_addr_mut().set((temp & 0xff00) | value_16);
+                let t = self.t_addr().0;
+                self.v_addr_mut().set(t);
+                return AddrLatch::FirstWrite;
+            }
+        }
+
+        unreachable!();
+    }
+
+    fn write_data_v_loopy_reg(&mut self, value: u8) {
+        let v = self.v_addr().0;
+        self.write(v, value);
+        let big_increment: bool = self.control().vertical_inc_mode();
+        self.v_addr_mut()
+            .set(v + if big_increment { 32 } else { 1 });
+    }
+
+    fn read_data_v_loopy_reg(&mut self, addr: u16) -> u8 {
+        let mut data: u8 = 0;
+        data = self.data_buffer;
+        self.data_buffer = self.read(self.v_addr().0);
+
+        if addr >= PALETTE_RANGE_BEGIN {
+            data = self.data_buffer;
+        }
+
+        let big_increment: bool = self.control().vertical_inc_mode();
+        let v_addr_new: u16 = self.v_addr().0 + if big_increment { 32 } else { 1 };
+        self.v_addr_mut().set(v_addr_new);
+
+        data
+    }
+
+    fn update_nametbl_t_loopy_reg(&mut self, value: u8) {
+        self.control_mut().set(value);
+        let nt_x = self.control().nametbl_x() as u16;
+        let nt_y = self.control().nametbl_y() as u16;
+        self.t_addr_mut().nametbl_x_set(nt_x);
+        self.t_addr_mut().nametbl_y_set(nt_y);
+    }
+
     /// Read from PPU/secondary bus
     pub fn read(&self, addr: u16) -> u8 {
         let _valid_addr = addr & 0x3fff;
@@ -468,20 +596,17 @@ impl Ppu {
     }
 
     /// Write to main bus
-    pub fn poke_main(&mut self, addr: u16, _val: u8) {
+    pub fn poke_main(&mut self, addr: u16, value: u8) {
         match addr {
-            PPUCTRL => { /* unreadable */ }
-            PPUMASK => { /* unreadable */ }
-            PPUSTATUS => { /* unreadable */ }
-            OAMADDR => { /* unreadable */ }
-            OAMDATA => { /* unreadable */ }
-            PPUSCROLL => { /* unreadable */ }
-            PPUADDR => { /* unreadable */ }
-            PPUDATA => { /* unreadable */ }
-            _ => {
-                // Should not come here.
-                unreachable!();
-            }
+            PPUCTRL => self.update_nametbl_t_loopy_reg(value),
+            PPUMASK => self.mask_mut().set(value),
+            PPUSTATUS => {}
+            OAMADDR => {}
+            OAMDATA => {}
+            PPUSCROLL => self.addr_latch = self.scroll_t_loopy_reg(value),
+            PPUADDR => self.addr_latch = self.write_addr_t_loopy_reg(value),
+            PPUDATA => self.write_data_v_loopy_reg(value),
+            _ => unreachable!(),
         }
     }
 
@@ -494,28 +619,14 @@ impl Ppu {
             PPUMASK => { /* unreadable */ }
             PPUSTATUS => {
                 data = self.status_mut().observe();
-                self.addr_latch = false;
+                self.addr_latch = AddrLatch::FirstWrite;
             }
             OAMADDR => { /* unreadable */ }
             OAMDATA => { /* unreadable */ }
             PPUSCROLL => { /* unreadable */ }
             PPUADDR => { /* unreadable */ }
-            PPUDATA => {
-                data = self.data_buffer;
-                self.data_buffer = self.read(self.v_addr().0);
-
-                if addr >= PALETTE_RANGE_BEGIN {
-                    data = self.data_buffer;
-                }
-
-                let big_increment: bool = self.control().vram_increment_mode();
-                let v_addr_new: u16 = self.v_addr().0 + if big_increment { 32 } else { 1 };
-                self.v_addr_mut().set(v_addr_new);
-            }
-            _ => {
-                // Should not come here.
-                unreachable!();
-            }
+            PPUDATA => data = self.read_data_v_loopy_reg(addr),
+            _ => unreachable!(),
         }
 
         data
