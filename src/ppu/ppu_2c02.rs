@@ -2,9 +2,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 
+use ines::Mirroring;
 use olc_pixel_game_engine::{Pixel, Sprite};
 
-use crate::cart::cart::{Cartridge, MirrorKind};
+use crate::cart::cart::Cartridge;
 use crate::nes::nes::{Nes, NesComponent, PPU_MIRROR, PPU_RANGE_BEGIN, PPU_RANGE_END};
 
 // Screen limits
@@ -28,21 +29,23 @@ const PALETTE_RANGE_END: u16 = 0x3fff;
 //
 
 // PPU registers
-const PPUCTRL: u16 = 0x2000;
-const PPUMASK: u16 = 0x2001;
-const PPUSTATUS: u16 = 0x2002;
-const OAMADDR: u16 = 0x2003;
-const OAMDATA: u16 = 0x2004;
-const PPUSCROLL: u16 = 0x2005;
-const PPUADDR: u16 = 0x2006;
-const PPUDATA: u16 = 0x2007;
+const PPUCTRL: u16 = 0x00;
+const PPUMASK: u16 = 0x01;
+const PPUSTATUS: u16 = 0x02;
+const OAMADDR: u16 = 0x03;
+const OAMDATA: u16 = 0x04;
+const PPUSCROLL: u16 = 0x05;
+const PPUADDR: u16 = 0x06;
+const PPUDATA: u16 = 0x07;
 //
 
 /// Example:
+/// ```
 /// #[inline]
 /// fn vblank(&self) -> bool {
 ///     (self.0 & 1 << 7)) != 0;
 /// }
+/// ```
 macro_rules! bit {
     ($n: expr, $name: ident) => {
         #[inline]
@@ -53,10 +56,12 @@ macro_rules! bit {
 }
 
 /// Example:
+/// ```
 /// #[inline]
 /// fn vblank(&self, value: bool) -> bool {
 ///     self.0 = (self.0 & !(1 << 7)) | ((value as u8) << 7);
 /// }
+/// ```
 macro_rules! bit_setter {
     ($n: expr, $name: ident) => {
         #[inline]
@@ -67,10 +72,12 @@ macro_rules! bit_setter {
 }
 
 /// Example:
+/// ```
 /// #[inline]
 /// fn status_reg(&self) -> &PpuStatus {
 ///     &self.reg_set.status_reg
 /// }
+/// ```
 macro_rules! reg_getter {
     ($name: ident, $field: ident, $type: ty) => {
         #[inline]
@@ -81,10 +88,12 @@ macro_rules! reg_getter {
 }
 
 /// Example:
+/// ```
 /// #[inline]
 /// fn status_mut(&mut self) -> &mut PpuStatus {
 ///     &mut self.reg_set.status_reg
 /// }
+/// ```
 macro_rules! reg_setter {
     ($name: ident, $field: ident, $type: ty) => {
         #[inline]
@@ -96,7 +105,9 @@ macro_rules! reg_setter {
 
 /// Utility helper function.
 /// Example:
+/// ```
 /// bitseq(0b1000_0000_0000_0000, 15, 1) -> 1
+/// ```
 fn bitseq_get(value: u16, offset: u16, len: u16) -> u16 {
     let mut res: u16 = 0;
     let mut mask: u16 = 1 << offset;
@@ -112,7 +123,9 @@ fn bitseq_get(value: u16, offset: u16, len: u16) -> u16 {
 
 /// Utility helper function.
 /// Example:
+/// ```
 /// bitseq_set(0b1000_0000_0000_0000, 0, 0b1111, 4) -> 0b1000_0000_0000_1111
+///
 fn bitseq_set(mut value: u16, offset: u16, subvalue: u16, bitlen: u16) -> u16 {
     let mut mask = 1 << offset;
     let mut mask_sub = 1;
@@ -129,14 +142,17 @@ fn bitseq_set(mut value: u16, offset: u16, subvalue: u16, bitlen: u16) -> u16 {
 }
 
 /// Example:
+/// ```
 /// #[inline]
 /// fn unused(&self) -> u16 {
 ///    self.0 & 0b1000_0000_0000_0000
 /// }
 ///
+/// #[inline]
 /// fn unused_set(&mut self, value: u16) -> u16 {
 ///     self.0 = (self.0 & !())
-//  self.0 = (self.0 & !(1 << $n)) | ((value as u8) << $n);
+///  self.0 = (self.0 & !(1 << $n)) | ((value as u8) << $n);
+/// ```
 /// }
 
 macro_rules! bitseq {
@@ -157,19 +173,17 @@ macro_rules! bitseq_setter {
     };
 }
 
+pub trait PpuReg {
+    fn new() -> Self;
+    fn set(&mut self, value: u8);
+    fn get(&self) -> u8;
+}
+
 /// Registers
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct PpuCtrl(u8);
+pub struct PpuCtrl(u8);
 
 impl PpuCtrl {
-    fn new() -> Self {
-        Self(0)
-    }
-
-    fn set(&mut self, value: u8) {
-        self.0 = value;
-    }
-
     // Getters for the bit flags
     bit!(0, nametbl_x);
     bit!(1, nametbl_y);
@@ -181,10 +195,7 @@ impl PpuCtrl {
     bit!(7, nmi_enabled);
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct PpuMask(u8);
-
-impl PpuMask {
+impl PpuReg for PpuCtrl {
     fn new() -> Self {
         Self(0)
     }
@@ -193,6 +204,29 @@ impl PpuMask {
         self.0 = value;
     }
 
+    fn get(&self) -> u8 {
+        self.0
+    }
+}
+
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct PpuMask(u8);
+
+impl PpuReg for PpuMask {
+    fn new() -> Self {
+        Self(0)
+    }
+
+    fn set(&mut self, value: u8) {
+        self.0 = value;
+    }
+
+    fn get(&self) -> u8 {
+        self.0
+    }
+}
+
+impl PpuMask {
     bit!(0, grayscale_enabled);
     bit!(1, render_bg_left);
     bit!(2, render_fg_left);
@@ -204,9 +238,8 @@ impl PpuMask {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct PpuStatus(u8);
-
-impl PpuStatus {
+pub struct PpuStatus(u8);
+impl PpuReg for PpuStatus {
     fn new() -> Self {
         Self(0)
     }
@@ -215,8 +248,16 @@ impl PpuStatus {
         self.0 = value;
     }
 
-    fn observe(&mut self) -> u8 {
-        let data: u8 = self.0 & 0b1110_0000;
+    fn get(&self) -> u8 {
+        self.0
+    }
+}
+
+impl PpuStatus {
+    /// `debris` is the previous data held in the data buffe.
+    fn observe(&mut self, debris: u8) -> u8 {
+        self.set_vblank(true);
+        let data: u8 = self.0 & 0b1110_0000 | (debris & 0x1f);
         self.set_vblank(false);
 
         data
@@ -233,7 +274,7 @@ impl PpuStatus {
 }
 
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-struct PpuDot {
+pub struct PpuDot {
     scanline: i32,
     cycles: i32,
 }
@@ -247,12 +288,12 @@ impl PpuDot {
     }
 
     #[inline]
-    fn cycles(&self) -> i32 {
+    pub(crate) fn cycles(&self) -> i32 {
         self.cycles
     }
 
     #[inline]
-    fn scanline(&self) -> i32 {
+    pub(crate) fn scanline(&self) -> i32 {
         self.scanline
     }
 
@@ -297,7 +338,7 @@ impl PpuDot {
 /// +++----------------- fine Y scroll
 /// ```
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct LoopyReg(u16);
+pub struct LoopyReg(u16);
 
 impl LoopyReg {
     fn new() -> Self {
@@ -319,15 +360,18 @@ impl LoopyReg {
     fn set(&mut self, value: u16) {
         self.0 = value;
     }
+    pub(crate) fn get(&self) -> u16 {
+        self.0
+    }
 }
 
 pub struct PpuRegSet {
-    control_reg: PpuCtrl,
-    mask_reg: PpuMask,
-    status_reg: PpuStatus,
-    dot: PpuDot,
-    t_addr: LoopyReg,
-    v_addr: LoopyReg,
+    pub control_reg: PpuCtrl,
+    pub mask_reg: PpuMask,
+    pub status_reg: PpuStatus,
+    pub dot: PpuDot,
+    pub t_addr: LoopyReg,
+    pub v_addr: LoopyReg,
 }
 
 impl PpuRegSet {
@@ -371,8 +415,8 @@ pub struct Ppu {
     colours: [Pixel; 64],
 
     /// Internal states
-    reg_set: PpuRegSet,
-    frame_end: bool,
+    pub reg_set: PpuRegSet,
+    pub frame_end: bool,
 
     fine_x: u8,
     data_buffer: u8,
@@ -507,21 +551,18 @@ impl Ppu {
     pub fn read(&self, mut addr: u16) -> u8 {
         addr &= PPU_RANGE_END;
 
-        let mut cart_handle: bool = false;
-
         if let Some(cart) = &self.cart {
             if let Some(read_from_cart) = cart.borrow_mut().chr_mem_read(addr) {
-                cart_handle = true;
                 return read_from_cart;
             }
         }
 
         let mut data: u8 = 0;
-        if addr >= PATTERN_TABLES_BEGIN && addr <= PATTERN_TABLES_END {
+        if (PATTERN_TABLES_BEGIN..=PATTERN_TABLES_END).contains(&addr) {
             data = self.pattern_table[addr as usize];
-        } else if addr >= NAMETABLES_BEGIN && addr <= NAMETABLES_END {
+        } else if (NAMETABLES_BEGIN..=NAMETABLES_END).contains(&addr) {
             data = self.read_from_nametable(addr);
-        } else if addr >= PALETTE_RANGE_BEGIN && addr <= PALETTE_RANGE_END {
+        } else if (PALETTE_RANGE_BEGIN..=PALETTE_RANGE_END).contains(&addr) {
             data = self.read_from_palette(addr);
         }
 
@@ -531,19 +572,17 @@ impl Ppu {
     /// Write to secondary bus
     pub fn write(&mut self, mut addr: u16, value: u8) {
         addr &= PPU_RANGE_END;
-        let mut cart_handle: bool = false;
 
         if let Some(cart) = &self.cart {
             cart.borrow_mut().chr_mem_writ(addr, value);
-            cart_handle = true;
             return;
         }
 
-        if addr >= PATTERN_TABLES_BEGIN && addr <= PATTERN_TABLES_END {
+        if (PATTERN_TABLES_BEGIN..=PATTERN_TABLES_END).contains(&addr) {
             self.pattern_table[addr as usize] = value;
-        } else if addr >= NAMETABLES_BEGIN && addr <= NAMETABLES_END {
+        } else if (NAMETABLES_BEGIN..=NAMETABLES_END).contains(&addr) {
             self.write_to_nametable(addr, value);
-        } else if addr >= PALETTE_RANGE_BEGIN && addr <= PALETTE_RANGE_END {
+        } else if (PALETTE_RANGE_BEGIN..=PALETTE_RANGE_END).contains(&addr) {
             self.write_to_palette(addr, value);
         }
     }
@@ -581,14 +620,14 @@ impl Ppu {
 
         if let Some(cart) = &self.cart {
             let cart_ref = cart.borrow();
-            let coeffs: Vec<u16> = match cart_ref.mirror {
-                MirrorKind::Horizontal => vec![0, 0, 1, 1],
-                MirrorKind::Vertical => vec![0, 1, 0, 1],
+            let coefficients: Vec<u16> = match cart_ref.mirroring() {
+                Mirroring::Horizontal => vec![0, 0, 1, 1],
+                Mirroring::Vertical => vec![0, 1, 0, 1],
             };
 
             let inner = addr & 0x3fff;
             let idx = (addr - NAMETABLES_BEGIN) / SINGLE_NAMETABLE_SIZE;
-            let coeff = coeffs[idx as usize];
+            let coeff = coefficients[idx as usize];
             return inner + coeff * (SINGLE_NAMETABLE_SIZE * 2);
         }
 
@@ -723,7 +762,9 @@ impl Ppu {
             PPUCTRL => { /* unreadable */ }
             PPUMASK => { /* unreadable */ }
             PPUSTATUS => {
-                data = self.status_mut().observe();
+                println!("reading from PPUSTATUS");
+                let debris = self.data_buffer;
+                data = self.status_mut().observe(debris);
                 self.addr_latch = AddrLatch::FirstWrite;
             }
             OAMADDR => { /* unreadable */ }
@@ -739,12 +780,12 @@ impl Ppu {
 
     pub fn clock(&mut self) {
         // Generate random noise
-        // let noise = if rand::random() { 0x3F } else { 0x30 };
-        // self.screen.set_pixel(
-        //     self.reg_set.dot.cycles() - 1,
-        //     self.reg_set.dot.scanline(),
-        // self.colours[noise],
-        // );
+        let noise = if rand::random() { 0x3F } else { 0x30 };
+        self.screen.set_pixel(
+            self.reg_set.dot.cycles() - 1,
+            self.reg_set.dot.scanline(),
+            self.colours[noise],
+        );
         // ----
 
         self.frame_end = self.dot_mut().update();

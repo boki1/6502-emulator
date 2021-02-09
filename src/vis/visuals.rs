@@ -2,6 +2,7 @@ use olc_pixel_game_engine as olc;
 
 use crate::cpu::mos6502::{Asm, Flag::*, Vectors};
 use crate::nes::nes::Nes;
+use crate::ppu::ppu_2c02::PpuReg;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum Layouts {
@@ -11,6 +12,23 @@ pub enum Layouts {
     PaletteAndPattern,
     Help,
     Game,
+}
+
+impl Layouts {
+    fn to_string(&self) -> String {
+        use Layouts::*;
+
+        let rv = match *self {
+            RAM => "RAM",
+            Internals => "NES Internals",
+            Disassembly => "Disassembly",
+            PaletteAndPattern => "PPU palette and pattern",
+            Help => "Help",
+            Game => "Game",
+        };
+
+        rv.to_string()
+    }
 }
 
 pub struct GuiMonitor<'console> {
@@ -34,9 +52,10 @@ impl olc::Application for GuiMonitor<'_> {
 
         olc::clear(olc::BLACK);
 
+        self.handle_layout_input();
+
         if self.in_stepping_mode {
             self.handle_debugger_input();
-            self.handle_layout_input();
         } else {
             self.nes.sys_clock();
         }
@@ -61,8 +80,23 @@ impl olc::Application for GuiMonitor<'_> {
 }
 
 impl GuiMonitor<'_> {
+    fn display_layout_meta_info(&mut self) -> Result<(), olc::Error> {
+        olc::draw_string(2, 2, &self.curr_layout.to_string(), olc::WHITE)?;
+
+        if self.in_stepping_mode {
+            olc::fill_rect(700, 2, 8, 20, olc::RED);
+            olc::fill_rect(715, 2, 8, 20, olc::RED);
+        } else {
+            olc::fill_triangle(700, 2, 700, 22, 715, 12, olc::GREEN);
+        }
+
+        Ok(())
+    }
+
     fn display_curr_layout(&mut self) -> Result<(), olc::Error> {
         use Layouts::*;
+        self.display_layout_meta_info()?;
+
         match self.curr_layout {
             RAM => {
                 self.display_mem(50, 50, 0x0, 16, 16)?;
@@ -74,16 +108,16 @@ impl GuiMonitor<'_> {
                 self.display_controller_state(100, 20)?;
             }
             PaletteAndPattern => {
-                self.display_pattern_with_palette(0, 0)?;
+                self.display_pattern_with_palette(100, 100)?;
             }
             Disassembly => {
-                self.display_code(150, 50)?;
+                self.display_code(50, 50)?;
             }
             Game => {
-                self.display_game(2, 2);
+                self.display_game(136, 90);
             }
             Help => {}
-        }
+        };
 
         Ok(())
     }
@@ -112,8 +146,6 @@ impl GuiMonitor<'_> {
     fn handle_debugger_input(&mut self) {
         use olc::{get_key, Key::*};
 
-        let cpu = self.nes.cpu_mut();
-
         if get_key(N).pressed {
             self.nes.sys_clock();
         }
@@ -122,10 +154,14 @@ impl GuiMonitor<'_> {
             while self.nes.ppu().frame_has_ended() == false {
                 self.nes.sys_clock();
             }
+            self.nes.ppu.frame_end = false;
         }
 
         if get_key(S).pressed {
             while self.nes.cpu().instr_has_executed() == false {
+                self.nes.sys_clock();
+            }
+            while self.nes.cpu().instr_has_executed() {
                 self.nes.sys_clock();
             }
         }
@@ -139,7 +175,13 @@ impl GuiMonitor<'_> {
 
 impl GuiMonitor<'_> {
     pub fn display_game(&self, x_begin: i32, y_begin: i32) {
-        olc::draw_sprite(x_begin, y_begin, self.nes.ppu.screen());
+        olc::draw_sprite_with_scale_and_flip(
+            x_begin,
+            y_begin,
+            self.nes.ppu.screen(),
+            2,
+            olc::SpriteFlip::NONE,
+        );
     }
 
     pub fn display_mem(
@@ -174,10 +216,10 @@ impl GuiMonitor<'_> {
         for palette_idx in 0..PALETTE_LIMIT {
             for idx in 0..4 {
                 olc::fill_rect(
-                    50 + x + palette_idx * (chosen * 5) + idx * chosen,
-                    20 + y,
-                    chosen,
-                    chosen,
+                    50 + x + palette_idx * chosen * 15 + chosen * (idx + 10),
+                    300 + y,
+                    chosen * 10,
+                    chosen * 10,
                     self.nes
                         .ppu()
                         .map_pixel_to_color(palette_idx as u16, idx as u8),
@@ -185,15 +227,19 @@ impl GuiMonitor<'_> {
             }
         }
 
-        olc::draw_sprite(
+        olc::draw_sprite_with_scale_and_flip(
             x,
             y + 30,
             &self.nes.ppu().get_drawable_pattern(0, chosen as u16),
+            2,
+            olc::SpriteFlip::NONE,
         );
-        olc::draw_sprite(
-            x + 130,
+        olc::draw_sprite_with_scale_and_flip(
+            x + 270,
             y + 30,
             &self.nes.ppu().get_drawable_pattern(1, chosen as u16),
+            2,
+            olc::SpriteFlip::NONE,
         );
 
         Ok(())
@@ -201,12 +247,149 @@ impl GuiMonitor<'_> {
 
     pub fn display_controller_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
         // TODO:
-        unimplemented!();
+        // unimplemented!();
+        Ok(())
     }
 
     pub fn display_ppu_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
-        // TODO:
-        unimplemented!();
+        let ppu = self.nes.ppu();
+        let ctrl = ppu.reg_set.control_reg.get();
+        let mask = ppu.reg_set.mask_reg.get();
+        let status = ppu.reg_set.status_reg.get();
+        let oam_addr = 0u8;
+        let oam_data = 0u8;
+        let scroll = 0u8;
+        let addr = 0u8;
+        let data = 0u8;
+        let dma = 0u8;
+
+        let loopy_t: u16 = ppu.reg_set.t_addr.get();
+        let loopy_v: u16 = ppu.reg_set.v_addr.get();
+        let (scanlines, cycles) = (ppu.reg_set.dot.scanline(), ppu.reg_set.dot.cycles());
+
+        let ppu_x = x + 300;
+        let ppu_y = y + 50;
+
+        olc::draw_string_with_scale(ppu_x - 10, ppu_y - 10, "NTSC 2C02", olc::DARK_MAGENTA, 3)?;
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 25,
+            &format!("PPUCTRL={:#02x}", ctrl),
+            olc::DARK_CYAN,
+            2,
+        )?;
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 50,
+            &format!("PPUMASK={:#02x}", mask),
+            olc::DARK_CYAN,
+            2,
+        )?;
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 75,
+            &format!("PPUSTATUS={:#02x}", status),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 100,
+            &format!("OAMADDR={:#02x}", oam_addr),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 125,
+            &format!("OAMDATA={:#02x}", oam_data),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 150,
+            &format!("PPUSCROLL={:#02x}", scroll),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 175,
+            &format!("PPUADDR={:#02x}", addr),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 200,
+            &format!("PPUDATA={:#02x}", data),
+            olc::DARK_CYAN,
+            2,
+        )?;
+
+        olc::draw_line(
+            ppu_x - 30,
+            ppu_y + 225,
+            ppu_x + 200,
+            ppu_y + 225,
+            olc::WHITE,
+        );
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 230,
+            &format!("DMA={:#02x}", dma),
+            olc::DARK_GREEN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 255,
+            &format!("LOOPY_T={:#04x}", loopy_t),
+            olc::DARK_GREEN,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 280,
+            &format!("LOOPY_V={:#04x}", loopy_v),
+            olc::DARK_GREEN,
+            2,
+        )?;
+
+        olc::draw_line(
+            ppu_x - 30,
+            ppu_y + 305,
+            ppu_x + 200,
+            ppu_y + 305,
+            olc::WHITE,
+        );
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 310,
+            &format!("SCANLINE={}", scanlines),
+            olc::DARK_YELLOW,
+            2,
+        )?;
+
+        olc::draw_string_with_scale(
+            ppu_x,
+            ppu_y + 335,
+            &format!("CYCLES={}", cycles),
+            olc::DARK_YELLOW,
+            2,
+        )?;
+
+        Ok(())
     }
 
     pub fn display_cpu_state(&self, x: i32, y: i32) -> Result<(), olc::Error> {
@@ -220,89 +403,116 @@ impl GuiMonitor<'_> {
         let z = cpu.flagv(Z);
         let c = cpu.flagv(C);
 
-        olc::draw_string_with_scale(x, y - 50, "MOS 6502", olc::WHITE, 3)?;
+        let cpu_x = x + 30;
+        let cpu_y = y + 50;
 
-        olc::draw_string_with_scale(x, y + 25, &format!("A={:#04x}", cpu.state.a), olc::WHITE, 2)?;
-        olc::draw_string_with_scale(x, y + 50, &format!("X={:#04x}", cpu.state.x), olc::WHITE, 2)?;
-        olc::draw_string_with_scale(x, y + 75, &format!("Y={:#04x}", cpu.state.y), olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x - 10, cpu_y - 10, "MOS 6502", olc::DARK_MAGENTA, 3)?;
+
         olc::draw_string_with_scale(
-            x,
-            y + 100,
+            cpu_x,
+            cpu_y + 25,
+            &format!("A={:#04x}", cpu.state.a),
+            olc::GREY,
+            2,
+        )?;
+        olc::draw_string_with_scale(
+            cpu_x,
+            cpu_y + 50,
+            &format!("X={:#04x}", cpu.state.x),
+            olc::GREY,
+            2,
+        )?;
+        olc::draw_string_with_scale(
+            cpu_x,
+            cpu_y + 75,
+            &format!("Y={:#04x}", cpu.state.y),
+            olc::GREY,
+            2,
+        )?;
+        olc::draw_string_with_scale(
+            cpu_x,
+            cpu_y + 100,
             &format!("SP={:#06x}", cpu.state.sp),
-            olc::WHITE,
+            olc::GREY,
             2,
         )?;
         olc::draw_string_with_scale(
-            x,
-            y + 125,
+            cpu_x,
+            cpu_y + 125,
             &format!("PC={:#06x}", cpu.state.pc),
-            olc::WHITE,
+            olc::GREY,
             2,
         )?;
 
-        olc::draw_line(x, y + 150, x + 200, y + 150, olc::WHITE);
+        olc::draw_line(cpu_x, cpu_y + 150, cpu_x + 200, cpu_y + 150, olc::WHITE);
 
-        olc::draw_string_with_scale(x, y + 165, "N", olc::WHITE, 2)?;
-        olc::fill_rect(x, y + 182, 14, 4, if n { olc::GREEN } else { olc::RED });
-
-        olc::draw_string_with_scale(x + 15, y + 165, "V", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x, cpu_y + 165, "N", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 15,
-            y + 182,
+            cpu_x,
+            cpu_y + 182,
+            14,
+            4,
+            if n { olc::GREEN } else { olc::RED },
+        );
+
+        olc::draw_string_with_scale(cpu_x + 15, cpu_y + 165, "V", olc::WHITE, 2)?;
+        olc::fill_rect(
+            cpu_x + 15,
+            cpu_y + 182,
             14,
             4,
             if v { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 30, y + 165, "U", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 30, cpu_y + 165, "U", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 30,
-            y + 182,
+            cpu_x + 30,
+            cpu_y + 182,
             14,
             4,
             if u { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 45, y + 165, "B", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 45, cpu_y + 165, "B", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 45,
-            y + 182,
+            cpu_x + 45,
+            cpu_y + 182,
             14,
             4,
             if b { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 60, y + 165, "D", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 60, cpu_y + 165, "D", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 60,
-            y + 182,
+            cpu_x + 60,
+            cpu_y + 182,
             14,
             4,
             if d { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 75, y + 165, "I", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 75, cpu_y + 165, "I", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 75,
-            y + 182,
+            cpu_x + 75,
+            cpu_y + 182,
             14,
             4,
             if i { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 90, y + 165, "Z", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 90, cpu_y + 165, "Z", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 90,
-            y + 182,
+            cpu_x + 90,
+            cpu_y + 182,
             14,
             4,
             if z { olc::GREEN } else { olc::RED },
         );
 
-        olc::draw_string_with_scale(x + 105, y + 165, "C", olc::WHITE, 2)?;
+        olc::draw_string_with_scale(cpu_x + 105, cpu_y + 165, "C", olc::WHITE, 2)?;
         olc::fill_rect(
-            x + 105,
-            y + 182,
+            cpu_x + 105,
+            cpu_y + 182,
             14,
             4,
             if c { olc::GREEN } else { olc::RED },

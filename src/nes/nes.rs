@@ -84,13 +84,10 @@ impl Nes {
     }
 
     pub fn sys_clock(&mut self) {
-        println!("PPU frame render");
         self.ppu_mut().full_frame();
 
         if self.sys_clocks % 3 == 0 {
-            println!("CPU clock tick");
             self.cpu_mut().tick();
-            println!("{:?}", self.cpu().current);
         }
 
         self.sys_clocks += 1;
@@ -117,23 +114,6 @@ impl Nes {
     pub fn apu_mut(&mut self) -> &'_ mut Apu {
         &mut self.apu
     }
-
-    // TODO:
-    // pub fn cart(&self) -> Option<&'_ Cartridge> {
-    //     // if let Some(cart) = &self.cartridge {
-    //     //     return Some(&(*cart).borrow());
-    //     // }
-    //     None
-    // }
-    //
-    // pub fn cart_mut(&mut self) -> Option<&'_ mut Cartridge> {
-    //     if let Some(mut cart) = &self.cartridge {
-    //         if let Some(cart_ref) = Rc::get_mut(&mut cart) {
-    //             return Some(cart_ref.get_mut());
-    //         }
-    //     }
-    //     None
-    // }
 }
 
 impl Nes {
@@ -145,33 +125,39 @@ impl Nes {
         let mut cart_handle: bool = false;
 
         if let Some(cart) = &self.cartridge {
+            // let addr = addr % 0x4000;
             if let Some(read_from_cart) = cart.borrow_mut().prg_mem_read(addr) {
                 cart_handle = true;
                 read = read_from_cart;
             }
         }
 
+        let mut mirrored_addr = addr;
+
         if cart_handle == false {
             // The first check is implied by the type limit.
             // ''' addr >= RAM_BEGIN &&  '''
-            if addr <= RAM_END {
-                read = self.ram[(addr & RAM_MIRROR) as usize];
-            } else if addr >= PPU_RANGE_BEGIN && addr <= PPU_RANGE_END {
-                read = self.ppu_mut().peek_main(addr & PPU_MIRROR);
-            } else if addr >= CONTROLLER_RANGE_BEGIN && addr <= CONTROLLER_RANGE_END {
+            if (RAM_BEGIN..=RAM_END).contains(&addr) {
+                mirrored_addr %= RAM_MIRROR;
+                read = self.ram[mirrored_addr as usize];
+            } else if (PPU_RANGE_BEGIN..=PPU_RANGE_END).contains(&addr) {
+                mirrored_addr %= PPU_MIRROR;
+                read = self.ppu_mut().peek_main(mirrored_addr);
+            } else if (CONTROLLER_RANGE_BEGIN..=CONTROLLER_RANGE_END).contains(&addr) {
                 // TODO:
                 // Implement controller sensitivity
                 // todo!();
             }
         }
 
-        return read;
+        read
     }
 
     /// Initiate write to the main nes bus (or cartridge).
     pub fn write(&mut self, addr: u16, data: u8) {
         let mut cart_handle: bool = false;
         if let Some(cart) = &mut self.cartridge {
+            // let addr = addr % 0x4000;
             cart.borrow_mut().prg_mem_writ(addr, data);
             cart_handle = true;
         }
@@ -179,11 +165,12 @@ impl Nes {
         if cart_handle == false {
             // The first check is implied by the type limit.
             // ''' addr >= RAM_BEGIN &&  '''
-            if addr <= RAM_END {
+
+            if (RAM_BEGIN..=RAM_END).contains(&addr) {
                 self.ram[(addr & RAM_MIRROR) as usize] = data;
-            } else if addr >= PPU_RANGE_BEGIN && addr <= PPU_RANGE_END {
+            } else if (PPU_RANGE_BEGIN..=PPU_RANGE_END).contains(&addr) {
                 self.ppu_mut().poke_main(addr & PPU_MIRROR, data);
-            } else if addr >= CONTROLLER_RANGE_BEGIN && addr <= CONTROLLER_RANGE_END {
+            } else if (CONTROLLER_RANGE_BEGIN..=CONTROLLER_RANGE_END).contains(&addr) {
                 // TODO:
                 // Implement controller sensitivity
                 todo!();

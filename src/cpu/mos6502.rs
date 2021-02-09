@@ -123,8 +123,7 @@ pub struct Cpu {
     pub current: Option<Instruction>,
     pub state: RegSet,
     pub additional_cycle: bool,
-    temp_cycles: u8,
-    instr_has_executed: bool,
+    temp_cycles: i8,
 }
 
 impl std::fmt::Display for Cpu {
@@ -165,7 +164,6 @@ impl Cpu {
             time: 0,
             temp_cycles: 0,
             additional_cycle: false,
-            instr_has_executed: true,
             current: None,
             state: RegSet::new(),
         }
@@ -173,7 +171,7 @@ impl Cpu {
 
     #[inline]
     pub fn instr_has_executed(&self) -> bool {
-        self.instr_has_executed
+        self.temp_cycles == 0
     }
 
     /// Given a mutable reference to an address, make two consecutive reads and update the address
@@ -254,7 +252,7 @@ impl Cpu {
         info!("opcode={:?}", self.temp_opcode);
         if let Some(i) = DECODING_TABLE.get(&self.temp_opcode) {
             self.current = Some(i.clone());
-            self.temp_cycles = i.cycles;
+            self.temp_cycles = i.cycles as i8 + self.additional_cycle as i8;
             info!("instruction present -> {:?}", i);
         } else {
             self.current = None;
@@ -290,7 +288,6 @@ impl Cpu {
         }
 
         self.temp_cycles -= 1;
-        self.instr_has_executed = if self.temp_cycles == 0 { true } else { false };
     }
 
     /// High-level function. Resets the status of the CPU, according to the provided information in

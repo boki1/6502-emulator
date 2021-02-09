@@ -1,4 +1,4 @@
-use super::mapper::Mapper;
+use super::mapper::MapperAccess;
 
 pub struct Nrom {
     pub prog_banks: u16,
@@ -14,7 +14,7 @@ impl Nrom {
     }
 }
 
-impl Mapper for Nrom {
+impl MapperAccess for Nrom {
     // if PRGROM is 16KB
     //     CPU Address Bus          PRG ROM
     //     0x8000 -> 0xBFFF: Map    0x0000 -> 0x3FFF
@@ -24,18 +24,17 @@ impl Mapper for Nrom {
     //     0x8000 -> 0xFFFF: Map    0x0000 -> 0x7FFF
 
     fn map_read_main(&self, addr: u16) -> Option<u16> {
-        if addr >= 0x8000
-        /* && addr <= 0xffff */
-        {
-            return Some(addr & if self.prog_banks > 1 { 0x7fff } else { 0x3fff });
+        if addr >= 0x8000 {
+            let mask: u16 = if self.prog_banks > 1 { 0x7fff } else { 0x3fff };
+            let mapped = addr & mask;
+            return Some(mapped);
         }
         None
     }
     fn map_write_main(&self, addr: u16) -> Option<u16> {
-        if addr >= 0x8000
-        /* && addr <= 0xffff */
-        {
-            return Some(addr & if self.prog_banks > 1 { 0x7fff } else { 0x3fff });
+        if addr >= 0x8000 {
+            let mask: u16 = if self.prog_banks > 1 { 0x7fff } else { 0x3fff };
+            return Some(addr & mask);
         }
         None
     }
@@ -52,8 +51,8 @@ impl Mapper for Nrom {
 
     fn map_write_sec(&self, addr: u16) -> Option<u16> {
         if addr <= 0x1fff {
-            // ram
             if self.char_banks == 0 {
+                // As RAM
                 return Some(addr);
             }
         }

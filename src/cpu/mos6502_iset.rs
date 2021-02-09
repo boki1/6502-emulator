@@ -24,7 +24,7 @@ impl Cpu {
         self.flag(Flag::V, overflowed);
 
         // Here whether additional_cycle may appear is computed in when addressing memory for the operand
-
+        self.additional_cycle = true;
         self.state.a = (result & 0x00ff) as u8;
     }
 
@@ -69,7 +69,8 @@ impl Cpu {
 
     /// Performs the common behaviour of all branch instructions.
     /// Evaluate the final address of the operand, check for page crossing and update the PC.
-    fn __b_common(&mut self) {
+    #[inline]
+    fn branch_instr_common(&mut self) {
         //print!("{} rel to {} => ", self.addr_rel, self.addr_abs);
         self.addr_abs = self.addr_rel.wrapping_add(self.state.pc);
         //println!("{}", self.addr_abs);
@@ -80,29 +81,29 @@ impl Cpu {
     /// branch on carry clear
     pub fn bcc(&mut self) {
         if self.flagv(Flag::C) == false {
-            self.__b_common();
+            self.branch_instr_common();
         }
     }
 
     /// branch on carry set
     pub fn bcs(&mut self) {
         if self.flagv(Flag::C) == true {
-            self.__b_common();
+            self.branch_instr_common();
         }
     }
 
     /// branch on zero set
     pub fn beq(&mut self) {
-        if self.flagv(Flag::Z) == true {
-            self.__b_common();
+        if self.flagv(Flag::Z) {
+            self.branch_instr_common();
         }
     }
 
     /// test bits in memory with accumulator
     /// modifies N, V, Z
     pub fn bit(&mut self) {
-        let conjuction = self.state.a & self.fetched;
-        if conjuction == 0 {
+        let conjunction = self.state.a & self.fetched;
+        if conjunction == 0 {
             self.flag_raise(Flag::Z);
         }
 
@@ -115,22 +116,22 @@ impl Cpu {
 
     /// branch on result minus
     pub fn bmi(&mut self) {
-        if self.flagv(Flag::N) == true {
-            self.__b_common();
+        if self.flagv(Flag::N) {
+            self.branch_instr_common();
         }
     }
 
     /// branch on result not zero
     pub fn bne(&mut self) {
-        if self.flagv(Flag::Z) == false {
-            self.__b_common();
+        if !self.flagv(Flag::Z) {
+            self.branch_instr_common();
         }
     }
 
     /// branch on result plus
     pub fn bpl(&mut self) {
-        if self.flagv(Flag::N) == false {
-            self.__b_common();
+        if self.flagv(Flag::N) {
+            self.branch_instr_common();
         }
     }
 
@@ -159,14 +160,14 @@ impl Cpu {
     /// branch on overflow clear
     pub fn bvc(&mut self) {
         if self.flagv(Flag::V) == false {
-            self.__b_common();
+            self.branch_instr_common();
         }
     }
 
     /// branch on overflow set
     pub fn bvs(&mut self) {
         if self.flagv(Flag::V) == true {
-            self.__b_common();
+            self.branch_instr_common();
         }
     }
 
@@ -191,7 +192,8 @@ impl Cpu {
     }
 
     /// common behaviour of compare instructions
-    fn __cmp_common(&mut self, reg: u8) {
+    #[inline]
+    fn compare_instr_common(&mut self, reg: u8) {
         if reg >= self.fetched {
             self.flag_raise(Flag::C);
         }
@@ -207,17 +209,17 @@ impl Cpu {
 
     /// compare memory with accumulator
     pub fn cmp(&mut self) {
-        self.__cmp_common(self.state.a);
+        self.compare_instr_common(self.state.a);
     }
 
     /// compare memory with x index
     pub fn cpx(&mut self) {
-        self.__cmp_common(self.state.x);
+        self.compare_instr_common(self.state.x);
     }
 
     /// compare memory with y index
     pub fn cpy(&mut self) {
-        self.__cmp_common(self.state.y);
+        self.compare_instr_common(self.state.y);
     }
 
     /// decrement memory or accumulator
@@ -235,31 +237,22 @@ impl Cpu {
         }
     }
 
-    /// common behaviour of increment functions
-    fn __inc_common(&mut self, reg_ref: &mut u8, val: u8, signed: bool) {
-        if signed {
-            *reg_ref -= val;
-        } else {
-            *reg_ref += val;
-        }
-
-        let r = *reg_ref;
-        self.flag(Flag::N, r & 0x80 != 0);
-        self.flag(Flag::Z, r == 0);
-    }
-
     /// decrement x index
     pub fn dex(&mut self) {
-        let mut xx = self.state.x;
-        self.__inc_common(&mut xx, 1, true);
-        self.state.x = xx;
+        self.state.x.wrapping_sub(1);
+
+        let x = self.state.x;
+        self.flag(Flag::N, x & 0x80 != 0);
+        self.flag(Flag::Z, x == 0);
     }
 
     /// decrement y index
     pub fn dey(&mut self) {
-        let mut yy = self.state.y;
-        self.__inc_common(&mut yy, 1, true);
-        self.state.y = yy;
+        self.state.y.wrapping_sub(1);
+
+        let y = self.state.y;
+        self.flag(Flag::N, y & 0x80 != 0);
+        self.flag(Flag::Z, y == 0);
     }
 
     /// exclusive-or on accumulator
@@ -281,16 +274,20 @@ impl Cpu {
 
     /// increment x index
     pub fn inx(&mut self) {
-        let mut xx = self.state.x;
-        self.__inc_common(&mut xx, 1, false);
-        self.state.x = xx;
+        self.state.x.wrapping_add(1);
+
+        let x = self.state.x;
+        self.flag(Flag::N, x & 0x80 != 0);
+        self.flag(Flag::Z, x == 0);
     }
 
     /// increment y index
     pub fn iny(&mut self) {
-        let mut yy = self.state.y;
-        self.__inc_common(&mut yy, 1, false);
-        self.state.y = yy;
+        self.state.y.wrapping_add(1);
+
+        let y = self.state.y;
+        self.flag(Flag::N, y & 0x80 != 0);
+        self.flag(Flag::Z, y == 0);
     }
 
     /// jump to new location
@@ -310,7 +307,8 @@ impl Cpu {
     }
 
     /// common behaviour of all load functions
-    fn __load_common(&mut self, reg_ref: &mut u8) {
+    #[inline]
+    fn ld_instr_common(&mut self, reg_ref: &mut u8) {
         *reg_ref = self.fetched;
         self.flag(Flag::N, *reg_ref & 0x80 != 0);
         self.flag(Flag::Z, *reg_ref == 0);
@@ -319,21 +317,21 @@ impl Cpu {
     /// load accumulator with memory
     pub fn lda(&mut self) {
         let mut ac = self.state.a;
-        self.__load_common(&mut ac);
+        self.ld_instr_common(&mut ac);
         self.state.a = ac;
     }
 
     /// load index x with memory
     pub fn ldx(&mut self) {
         let mut xx = self.state.x;
-        self.__load_common(&mut xx);
+        self.ld_instr_common(&mut xx);
         self.state.x = xx;
     }
 
     /// load index y with memory
     pub fn ldy(&mut self) {
         let mut yy = self.state.y;
-        self.__load_common(&mut yy);
+        self.ld_instr_common(&mut yy);
         self.state.y = yy;
     }
 

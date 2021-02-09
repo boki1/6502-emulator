@@ -39,7 +39,7 @@ fn main() {
     let nes: &mut Nes = unsafe { Rc::get_mut_unchecked(&mut nes_wrapper).get_mut() };
     nes.reset();
 
-    let cart = Rc::new(RefCell::new(Cartridge::new("config/nestest.nes")));
+    let cart = Rc::new(RefCell::new(Cartridge::from_filename("config/nestest.nes")));
     nes.insert_cart(cart.clone());
 
     let mos6502 = nes.cpu_mut();
@@ -56,5 +56,5 @@ fn main() {
         extra_time: 0.,
     };
 
-    olc::start("Nessy", &mut monitor, 256, 240, 1, 1).unwrap();
+    olc::start("Nessy", &mut monitor, 800, 600, 1, 1).unwrap();
 }
