@@ -17,6 +17,10 @@ pub const PPU_MIRROR: u16 = 0x7;
 pub const CONTROLLER_RANGE_BEGIN: u16 = 0x4016;
 pub const CONTROLLER_RANGE_END: u16 = 0x4017;
 
+// About reading: whether we observe the value or just read it for debugging purposes.
+pub const HAS_SIDE_EFFECT: bool = false;
+pub const HAS_NO_SIDE_EFFECT: bool = true;
+
 pub struct Nes {
     pub cpu: Cpu,
     pub ppu: Ppu,
@@ -120,7 +124,7 @@ impl Nes {
     /// Initiate read from the main nes bus (or cartridge).
     /// When the CPU and the PPU communicate, the PPU's registers update their values. Hence this
     /// method needs a mutable reference.
-    pub fn read(&mut self, addr: u16) -> u8 {
+    pub fn read(&mut self, addr: u16, no_side_effect: bool) -> u8 {
         let mut read: u8 = 0;
         let mut cart_handle: bool = false;
 
@@ -142,7 +146,7 @@ impl Nes {
                 read = self.ram[mirrored_addr as usize];
             } else if (PPU_RANGE_BEGIN..=PPU_RANGE_END).contains(&addr) {
                 mirrored_addr %= PPU_MIRROR;
-                read = self.ppu_mut().peek_main(mirrored_addr);
+                read = self.ppu_mut().peek_main(mirrored_addr, no_side_effect);
             } else if (CONTROLLER_RANGE_BEGIN..=CONTROLLER_RANGE_END).contains(&addr) {
                 // TODO:
                 // Implement controller sensitivity

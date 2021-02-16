@@ -182,6 +182,13 @@ impl Cpu {
         u16::from_le_bytes([lo, hi])
     }
 
+    fn debug_read_and_inc(&mut self, addr: &mut u16) -> u8 {
+        let container = self.container_of_mut();
+        let lo = container.read(*addr, HAS_NO_SIDE_EFFECT);
+        *addr += 1;
+        lo
+    }
+
     /// Given a mutable reference to an address, make a read and update the address.
     pub fn read_and_inc(&mut self, addr: &mut u16) -> u8 {
         let lo = self.read_bus(*addr);
@@ -208,7 +215,7 @@ impl Cpu {
     /// other value.
     pub fn read_bus(&mut self, addr: u16) -> u8 {
         let cont = self.container_of_mut();
-        let val = cont.read(addr);
+        let val = cont.read(addr, HAS_SIDE_EFFECT);
         val
     }
 
@@ -492,7 +499,7 @@ impl Cpu {
         let mut cols: u8;
 
         while addr < end {
-            opcode = self.read_and_inc(&mut addr);
+            opcode = self.debug_read_and_inc(&mut addr);
             entry = DECODING_TABLE.get(&opcode);
             if entry.is_none() {
                 continue;

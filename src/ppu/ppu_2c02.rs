@@ -754,8 +754,30 @@ impl Ppu {
         }
     }
 
+    pub fn debug_peek_main(&self, addr: u16) -> u8 {
+        let addr = addr & PPU_MIRROR;
+        let mut data: u8 = 0;
+        match addr {
+            PPUCTRL => data = self.reg_set.control_reg.get(),
+            PPUMASK => data = self.reg_set.mask_reg.get(),
+            PPUSTATUS => data = self.reg_set.status_reg.get(),
+            OAMADDR => {}
+            OAMDATA => {}
+            PPUSCROLL => {}
+            PPUADDR => {}
+            PPUDATA => {}
+            _ => {}
+        }
+
+        data
+    }
+
     /// Read from main bus
-    pub fn peek_main(&mut self, addr: u16) -> u8 {
+    pub fn peek_main(&mut self, addr: u16, no_side_effect: bool) -> u8 {
+        if no_side_effect {
+            return self.debug_peek_main(addr);
+        }
+
         let mut data: u8 = 0;
 
         match addr {
