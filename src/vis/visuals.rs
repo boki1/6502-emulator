@@ -158,7 +158,7 @@ impl GuiMonitor<'_> {
         }
 
         if get_key(S).pressed {
-            while self.nes.cpu().instr_has_executed() == false {
+            while !self.nes.cpu().instr_has_executed() {
                 self.nes.sys_clock();
             }
             while self.nes.cpu().instr_has_executed() {

@@ -88,7 +88,7 @@ impl Nes {
     }
 
     pub fn sys_clock(&mut self) {
-        self.ppu_mut().full_frame();
+        self.ppu_mut().clock();
 
         if self.sys_clocks % 3 == 0 {
             self.cpu_mut().tick();
@@ -138,7 +138,7 @@ impl Nes {
 
         let mut mirrored_addr = addr;
 
-        if cart_handle == false {
+        if !cart_handle {
             // The first check is implied by the type limit.
             // ''' addr >= RAM_BEGIN &&  '''
             if (RAM_BEGIN..=RAM_END).contains(&addr) {

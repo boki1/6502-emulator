@@ -282,7 +282,7 @@ pub struct PpuDot {
 impl PpuDot {
     fn new() -> Self {
         Self {
-            scanline: 261,
+            scanline: 0,
             cycles: 0,
         }
     }
@@ -802,11 +802,11 @@ impl Ppu {
 
     pub fn clock(&mut self) {
         // Generate random noise
-        let noise = if rand::random() { 0x3F } else { 0x30 };
+        let noise_color: Pixel = self.colours[if rand::random() { 0x3F } else { 0x30 }];
         self.screen.set_pixel(
             self.reg_set.dot.cycles() - 1,
             self.reg_set.dot.scanline(),
-            self.colours[noise],
+            noise_color,
         );
         // ----
 
@@ -814,7 +814,7 @@ impl Ppu {
     }
 
     pub fn full_frame(&mut self) {
-        while self.frame_has_ended() == false {
+        while !self.frame_has_ended() {
             self.clock();
         }
         self.frame_reset();
