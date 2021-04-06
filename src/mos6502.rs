@@ -249,7 +249,9 @@ impl Cpu {
     /// **if one is present**
     fn read_byte(&self, address: Address) -> Byte {
         if let Some(bus) = &self.bus_conn {
-            return (*bus.borrow()).read(address);
+            if let Some(data) = (*bus.borrow()).read(address) {
+                return data;
+            }
         }
         0
     }
@@ -265,9 +267,20 @@ impl Cpu {
     /// **read_word()** - Wrapper function for reading two sequential
     /// bytes from the interface **if one is present**.
     fn read_word(&self, address: Address) -> Word {
-        let lo = Word::from(self.read_byte(address));
-        let hi = Word::from(self.read_byte(address + 1));
-        (hi << 8) | lo
+        let lo = self.read_byte(address);
+        let hi = self.read_byte(address + 1);
+        Word::from_le_bytes([lo, hi])
+    }
+
+    /// **read_some()** - Reads sequence of bytes from the interface
+    fn read_some(&self, address: Address, len: u16) -> Vec<Byte> {
+        if let Some(bus) = &self.bus_conn {
+            if let Some(result) = (*bus.borrow()).read_seq(address, len) {
+                return result;
+            }
+        }
+
+        vec![]
     }
 }
 
@@ -278,8 +291,15 @@ impl Default for Cpu {
 }
 
 pub trait CommunicationInterface {
-    fn read(&self, address: Address) -> Byte;
+    /// **read()** - Read the value of a given address from the interface
+    fn read(&self, address: Address) -> Option<Byte>;
+
+    /// **write()** - Write a value to a given address of the interface
     fn write(&mut self, address: Address, data: Byte);
+
+    /// **read_seq()** - Read sequental from `address` to `address + len`
+    /// (or less if the limit is exceeded)
+    fn read_seq(&self, address: Address, len: u16) -> Option<Vec<Byte>>;
 }
 
 const RAM_SIZE: usize = 0x07ff;
@@ -299,12 +319,12 @@ impl MainBus {
 }
 
 impl CommunicationInterface for MainBus {
-    fn read(&self, address: Address) -> Byte {
+    fn read(&self, address: Address) -> Option<Byte> {
         let addr = usize::from(address);
         if addr >= self.mem.len() {
-            return 0;
+            return None;
         }
-        self.mem[addr]
+        Some(self.mem[addr])
     }
 
     fn write(&mut self, address: Address, data: Byte) {
@@ -314,6 +334,22 @@ impl CommunicationInterface for MainBus {
         }
 
         self.mem[addr] = data;
+    }
+
+    fn read_seq(&self, starting_address: Address, len: u16) -> Option<Vec<Byte>> {
+        let mut result: Vec<Byte> = Vec::new();
+
+        let limit: Address = starting_address + len;
+        for address in starting_address..limit {
+            if let Some(data) = self.read(address) {
+                result.push(data);
+            }
+        } 
+
+        if result.len() > 0 {
+            return Some(result);
+        }
+        None
     }
 }
 
@@ -388,7 +424,7 @@ impl Cpu {
     }
 
     /// **stk_pop()** - Pops a byte from the stack stored in memory with offset `STACK_OFFSET`.
-    /// **NB:** This routine will fail if no interface is connected.
+    /// **NB:** This routine will fail if no 1 passed; 0 failinterface is connected.
     fn stk_pop(&mut self) -> Byte {
         let mut stk_ptr = self.regset().stk_ptr();
         stk_ptr = stk_ptr.wrapping_add(1);
@@ -404,11 +440,11 @@ fn test__stk_operations() {
     let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
 
     cpu.stk_push(0xcd);
-    let cd = Word::from(cpu.stk_pop());
+    let cd = cpu.stk_pop();
     assert_eq!(cd, 0xcd);
 
     cpu.stk_push(0xab);
-    let ab = Word::from(cpu.stk_pop());
+    let ab = cpu.stk_pop();
     assert_eq!(ab, 0xab);
 }
 
@@ -418,14 +454,14 @@ fn test__stk_operations_double() {
     let data: Word = 0xabcd;
     cpu.stk_doublepush(data);
 
-    let cd = Word::from(cpu.stk_pop());
+    let cd = cpu.stk_pop();
     assert_eq!(cd, 0xcd);
 
-    let ab = Word::from(cpu.stk_pop());
+    let ab = cpu.stk_pop();
     assert_eq!(ab, 0xab);
 
-    let reassembled = ab << 8 | cd;
-    assert_eq!(reassembled, 0xabcd);
+    let value = Word::from_le_bytes([cd, ab]);
+    assert_eq!(value, 0xabcd);
 }
 
 #[test]
@@ -440,4 +476,12 @@ fn test__reset_cpu() {
     assert_eq!(unused, true);
     assert_eq!(overflowed, false);
     assert_eq!(carry, false);
+}
+
+#[test]
+fn test__read_seq_from_host() {
+    let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+    let result = cpu.read_some(0x000, 0x7ff);
+    let expected_result = vec![0x00; 0x7ff];
+    assert_eq!(expected_result, result);
 }
