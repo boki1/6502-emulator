@@ -171,7 +171,7 @@ impl Cpu {
             regset: RegisterSet::new(),
             time: Timings {
                 elapsed: 0,
-                residual: 0,
+                residual: 0
             },
             inter: InterruptHandling {
                 pending_irq: false,
@@ -181,6 +181,8 @@ impl Cpu {
         }
     }
 
+    /// **new_connected()** - Creates a new instance of a cpu with a bus interface
+    /// supported
     fn new_connected(bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>) -> Self {
         Self {
             bus_conn,
@@ -192,9 +194,15 @@ impl Cpu {
         // if !self.time.residual() {}
 
         self.time_mut().next();
-
     }
 
+    /// **inthandle()** - Handles any interrupts of the cpu.
+    /// The different kinds of intterrupts which the MOST 6502 supports
+    /// are BRK (software interrupt), IRQ (interrupt request) and
+    /// NMI (non-maskable interrupt).
+    /// NMIs cannot be disabled.
+    /// In order to allow IRQs, the flag `irq_disabled` in the status
+    /// register has to be clear.
     fn inthandle(&mut self) -> bool {
         let nmi_flag: bool = self.interrupt_handles().pending_nmi();
         let mut irq_flag: bool = self.interrupt_handles().pending_irq();
@@ -206,13 +214,25 @@ impl Cpu {
             return false;
         }
 
-
-
         return true;
     }
 
-    fn reset(&self) {}
+    /// **reset()** - Performs a reset to the internal state of the cpu
+    /// Among the flags in the status register, only the *UNUSED* flag is set.
+    /// Reset takes some time, so 8 cycles are set to be remaining in the
+    /// internal "clock" of the cpu
+    fn reset(&mut self) {
+        let mut regset = RegisterSet::new();
+        regset.set_status(0x00);
+        regset.set_unused(true);
+        self.regset = regset;
 
+        let timing = Timings { residual: 8, elapsed: 0};
+        self.time = timing;
+    }
+
+    /// **connect()** - Connects the cpu to a bus, providing a context
+    /// for read and write operations.
     fn connect_to(&mut self, conn: Rc<RefCell<dyn CommunicationInterface>>) {
         if self.bus_conn.is_some() {
             return;
@@ -223,6 +243,10 @@ impl Cpu {
 }
 
 impl Cpu {
+
+
+    /// **read_byte()** - Initiates a read request to the interface
+    /// **if one is present**
     fn read_byte(&self, address: Address) -> Byte {
         if let Some(bus) = &self.bus_conn {
             return (*bus.borrow()).read(address);
@@ -230,12 +254,16 @@ impl Cpu {
         0
     }
 
+    /// **writ_byte()** - Initiates a write request to the interface
+    /// **if one is present**
     fn writ_byte(&self, address: Address, data: Byte) {
         if let Some(bus) = &self.bus_conn {
             return (*bus.borrow_mut()).write(address, data);
         }
     }
 
+    /// **read_word()** - Wrapper function for reading two sequential
+    /// bytes from the interface **if one is present**.
     fn read_word(&self, address: Address) -> Word {
         let lo = Word::from(self.read_byte(address));
         let hi = Word::from(self.read_byte(address + 1));
@@ -338,11 +366,14 @@ fn test__cpu_with_host() {
 
 //
 // Utility
-// 
+//
 
 const STACK_OFFSET: Address = 0x100;
 
 impl Cpu {
+
+    /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
+    /// **NB:** This routine will fail if no interface is connected.
     fn stk_push(&mut self, data: Byte) {
         let mut stk_ptr = self.regset().stk_ptr();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
@@ -356,6 +387,8 @@ impl Cpu {
         self.stk_push((data) as u8);
     }
 
+    /// **stk_pop()** - Pops a byte from the stack stored in memory with offset `STACK_OFFSET`.
+    /// **NB:** This routine will fail if no interface is connected.
     fn stk_pop(&mut self) -> Byte {
         let mut stk_ptr = self.regset().stk_ptr();
         stk_ptr = stk_ptr.wrapping_add(1);
@@ -393,4 +426,18 @@ fn test__stk_operations_double() {
 
     let reassembled = ab << 8 | cd;
     assert_eq!(reassembled, 0xabcd);
+}
+
+#[test]
+fn test__reset_cpu() {
+    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+    cpu.reset();
+
+    let status_after_reset = cpu.regset().status();
+    let unused = status_after_reset & 1 << 5 != 0;
+    let overflowed = status_after_reset & 1 << 6 != 0;
+    let carry = status_after_reset & 1 << 1 != 0;
+    assert_eq!(unused, true);
+    assert_eq!(overflowed, false);
+    assert_eq!(carry, false);
 }
