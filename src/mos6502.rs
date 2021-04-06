@@ -1,6 +1,12 @@
 #![feature(concat_idents)]
 
 use getset::{CopyGetters, Getters, MutGetters, Setters};
+use std::cell::RefCell;
+use std::rc::Rc;
+
+pub(crate) type Address = u16;
+pub(crate) type Word = u16;
+pub(crate) type Byte = u8;
 
 /// This structure represents the registers each MOS 6502 has.
 /// They include one 8-bit accumulator register (A), two 8-bit
@@ -116,12 +122,38 @@ pub struct InterruptHandling {
     pending_irq: bool,
 }
 
-#[derive(Debug, Copy, Clone, PartialEq, Getters, CopyGetters, Setters, MutGetters)]
-#[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
+// TODO:
+// Dev doc
+// Init properly
+const NmiVector: u16 = 0x0000;
+const IrqBrkVector: u16 = 0x0000;
+const ResetVector: u16 = 0x0000;
+
 pub struct Cpu {
     regset: RegisterSet,
     time: Timings,
     inter: InterruptHandling,
+    bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>,
+}
+
+impl Cpu {
+    pub fn regset(&self) -> &RegisterSet {
+        &self.regset
+    }
+
+    pub fn time(&self) -> &Timings {
+        &self.time
+    }
+
+    pub fn interrupt_handles(&self) -> &InterruptHandling {
+        &self.inter
+    }
+}
+
+impl std::fmt::Debug for Cpu {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        todo!()
+    }
 }
 
 impl Cpu {
@@ -136,7 +168,41 @@ impl Cpu {
                 pending_irq: false,
                 pending_nmi: false,
             },
+            bus_conn: None,
         }
+    }
+
+    fn cycle(&self) {}
+
+    fn reset(&self) {}
+
+    fn connect_to(&mut self, conn: Rc<RefCell<dyn CommunicationInterface>>) {
+        if self.bus_conn.is_some() {
+            return;
+        }
+
+        self.bus_conn = Some(conn);
+    }
+}
+
+impl Cpu {
+    fn read_byte(&self, address: Address) -> Byte {
+        if let Some(bus) = &self.bus_conn {
+            return (*bus.borrow()).read(address);
+        }
+        0
+    }
+
+    fn writ_byte(&self, address: Address, data: Byte) {
+        if let Some(bus) = &self.bus_conn {
+            return (*bus.borrow_mut()).write(address, data);
+        }
+    }
+
+    fn read_word(&self, address: Address) -> Word {
+        let lo = self.read_byte(address) as u16;
+        let hi = self.read_byte(address + 1) as u16;
+        (hi << 8) | lo
     }
 }
 
@@ -147,8 +213,43 @@ impl Default for Cpu {
 }
 
 pub trait CommunicationInterface {
-    fn read(&self, address: u16) -> u8;
-    fn write(&self, address: u16, data: u8);
+    fn read(&self, address: Address) -> Byte;
+    fn write(&mut self, address: Address, data: Byte);
+}
+
+const RamSize: usize = 0x1fff;
+
+/// The "host" of our cpu
+/// Contains the contexual environment of the processor, most notably - memory.
+pub struct MainBus {
+    pub mem: Vec<Byte>,
+}
+
+impl MainBus {
+    fn new() -> Self {
+        Self {
+            mem: vec![0x0; RamSize],
+        }
+    }
+}
+
+impl CommunicationInterface for MainBus {
+    fn read(&self, address: Address) -> Byte {
+        let addr = usize::from(address);
+        if addr >= self.mem.len() {
+            return 0;
+        }
+        self.mem[addr]
+    }
+
+    fn write(&mut self, address: Address, data: Byte) {
+        let addr = usize::from(address);
+        if addr >= self.mem.len() {
+            return;
+        }
+
+        self.mem[addr] = data;
+    }
 }
 
 /// Tests
@@ -161,14 +262,9 @@ fn test__create_cpu() {
 
 #[test]
 fn test__getters_fields() {
-    let regset = RegisterSet::new();
+    let mut regset = RegisterSet::new();
     assert_eq!(regset.accumulator(), 0);
     assert_eq!(regset.stk_ptr(), 0xfd);
-}
-
-#[test]
-fn test__setters_fields() {
-    let mut regset = RegisterSet::new();
     regset.set_accumulator(1);
     assert_eq!(regset.accumulator(), 1);
 }
@@ -182,4 +278,23 @@ fn test__getters_and_setters_bits() {
     regset.set_carry(true);
     let carry_is_set: bool = regset.carry();
     assert_eq!(carry_is_set, true);
+}
+
+#[test]
+fn test__create_bus() {
+    let bus = MainBus::new();
+    assert_eq!(bus.mem[0], 0x0);
+}
+
+#[test]
+fn test__cpu_with_host() {
+    let mut bus = MainBus::new();
+    bus.write(1, 10);
+    let mut cpu = Cpu::new();
+    cpu.connect_to(Rc::new(RefCell::new(bus)));
+
+    let retval1 = cpu.read_byte(1);
+    let retval2 = cpu.read_byte(2);
+    assert_eq!(retval1, 10);
+    assert_eq!(retval2, 0);
 }
