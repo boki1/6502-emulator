@@ -7,7 +7,7 @@ pub type Word = u16;
 pub type Opcode = u16;
 pub type Byte = u8;
 
-pub type AddressingModeFn = fn(&mut Cpu) -> Address;
+pub type AddressingModeFn = fn(&mut Cpu);
 pub type InstructionFn = fn(&mut Cpu);
 
 /// This structure represents the registers each MOS 6502 has.
@@ -65,9 +65,9 @@ macro_rules! bit {
 #[derive(Debug, Copy, Clone, PartialEq, Getters, CopyGetters, Setters, MutGetters)]
 #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
 pub struct RegisterSet {
-    accumulator: i8,
-    x_index: i8,
-    y_index: i8,
+    accumulator: u8,
+    x_index: u8,
+    y_index: u8,
     stk_ptr: u8,
     prog_counter: u16,
     status: u8,
@@ -82,6 +82,13 @@ impl RegisterSet {
             stk_ptr: 0xfd,
             prog_counter: 0,
             status: 0x24,
+        }
+    }
+
+    fn new_custompc(custom_prog_counter: Address) -> Self {
+        Self {
+            prog_counter: custom_prog_counter,
+            ..Self::new()
         }
     }
 
@@ -138,11 +145,19 @@ const NMI_VECTOR: Address = 0xfffa;
 const RESET_VECTOR: Address = 0xfffc;
 const IRQ_BRK_VECTOR: Address = 0xfffe;
 
+#[derive(Getters, CopyGetters, Setters, MutGetters)]
 pub struct Cpu {
     regset: RegisterSet,
     time: Timings,
     inter: InterruptHandling,
     bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>,
+
+    // Helper fields
+    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
+    fetched: Byte,
+
+    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
+    next_address: Address
 }
 
 impl Cpu {
@@ -182,6 +197,8 @@ impl Cpu {
                 pending_nmi: false,
             },
             bus_conn: None,
+            fetched: 0x00,
+            next_address: 0x0000
         }
     }
 
@@ -190,6 +207,13 @@ impl Cpu {
     fn new_connected(bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>) -> Self {
         Self {
             bus_conn,
+            ..Cpu::new()
+        }
+    }
+
+    fn new_custompc(custom_prog_counter: Address) -> Self {
+        Self {
+            regset: RegisterSet::new_custompc(custom_prog_counter),
             ..Cpu::new()
         }
     }
@@ -307,7 +331,7 @@ pub trait CommunicationInterface {
     fn read_seq(&self, address: Address, len: u16) -> Option<Vec<Byte>>;
 }
 
-const RAM_SIZE: usize = 0x07ff;
+const RAM_SIZE: usize = 0xffff;
 
 /// The "host" of our cpu
 /// Contains the contexual environment of the processor, most notably - memory.
@@ -397,11 +421,14 @@ impl Instruction {
     /// **decode_by** - Match a given opcode value to its corresponding
     /// instruction.
     ///
-    /// The table is filled according to this resource: https://www.masswerk.at/6502/6502_instruction_set.html
+    /// The table is filled according to [this](https://www.masswerk.at/6502/6502_instruction_set.html) resource.
     ///
     /// **NB:** Illegal opcodes are not supported as of now
     ///
     fn decode_by(opcode: Opcode) -> Instruction {
+        use m6502_intruction_set::*;
+        use m6502_addressing_modes::*;
+
         return match opcode {
             0x00 => make_instr!(implied_am, brk, 7, "brk", 0x00),
             0x01 => make_instr!(indirect_x_am, ora, 6, "ora", 0x01),
@@ -576,118 +603,634 @@ impl Instruction {
 }
 
 ///
-/// Supported instructions
+/// Instruction set
+/// Legal MOS 6502 instructions
 ///
+mod m6502_intruction_set {
+    use super::Cpu;
 
-fn adc(cpu: &mut Cpu) {}
-fn and(cpu: &mut Cpu) {}
-fn asl(cpu: &mut Cpu) {}
-fn bcc(cpu: &mut Cpu) {}
-fn bcs(cpu: &mut Cpu) {}
-fn beq(cpu: &mut Cpu) {}
-fn bit(cpu: &mut Cpu) {}
-fn bmi(cpu: &mut Cpu) {}
-fn bne(cpu: &mut Cpu) {}
-fn bpl(cpu: &mut Cpu) {}
-fn brk(cpu: &mut Cpu) {}
-fn bvc(cpu: &mut Cpu) {}
-fn bvs(cpu: &mut Cpu) {}
-fn clc(cpu: &mut Cpu) {}
-fn cld(cpu: &mut Cpu) {}
-fn cli(cpu: &mut Cpu) {}
-fn clv(cpu: &mut Cpu) {}
-fn cmp(cpu: &mut Cpu) {}
-fn cpx(cpu: &mut Cpu) {}
-fn cpy(cpu: &mut Cpu) {}
-fn dec(cpu: &mut Cpu) {}
-fn dex(cpu: &mut Cpu) {}
-fn dey(cpu: &mut Cpu) {}
-fn eor(cpu: &mut Cpu) {}
-fn inc(cpu: &mut Cpu) {}
-fn inx(cpu: &mut Cpu) {}
-fn iny(cpu: &mut Cpu) {}
-fn jmp(cpu: &mut Cpu) {}
-fn jsr(cpu: &mut Cpu) {}
-fn lda(cpu: &mut Cpu) {}
-fn ldx(cpu: &mut Cpu) {}
-fn ldy(cpu: &mut Cpu) {}
-fn lsr(cpu: &mut Cpu) {}
-fn nop(cpu: &mut Cpu) {}
-fn ora(cpu: &mut Cpu) {}
-fn pha(cpu: &mut Cpu) {}
-fn php(cpu: &mut Cpu) {}
-fn pla(cpu: &mut Cpu) {}
-fn plp(cpu: &mut Cpu) {}
-fn rol(cpu: &mut Cpu) {}
-fn ror(cpu: &mut Cpu) {}
-fn rti(cpu: &mut Cpu) {}
-fn rts(cpu: &mut Cpu) {}
-fn sbc(cpu: &mut Cpu) {}
-fn sec(cpu: &mut Cpu) {}
-fn sed(cpu: &mut Cpu) {}
-fn sei(cpu: &mut Cpu) {}
-fn sta(cpu: &mut Cpu) {}
-fn stx(cpu: &mut Cpu) {}
-fn sty(cpu: &mut Cpu) {}
-fn tax(cpu: &mut Cpu) {}
-fn tay(cpu: &mut Cpu) {}
-fn tsx(cpu: &mut Cpu) {}
-fn txa(cpu: &mut Cpu) {}
-fn txs(cpu: &mut Cpu) {}
-fn tya(cpu: &mut Cpu) {}
+    pub fn adc(cpu: &mut Cpu) {}
+    pub fn and(cpu: &mut Cpu) {}
+    pub fn asl(cpu: &mut Cpu) {}
+    pub fn bcc(cpu: &mut Cpu) {}
+    pub fn bcs(cpu: &mut Cpu) {}
+    pub fn beq(cpu: &mut Cpu) {}
+    pub fn bit(cpu: &mut Cpu) {}
+    pub fn bmi(cpu: &mut Cpu) {}
+    pub fn bne(cpu: &mut Cpu) {}
+    pub fn bpl(cpu: &mut Cpu) {}
+    pub fn brk(cpu: &mut Cpu) {}
+    pub fn bvc(cpu: &mut Cpu) {}
+    pub fn bvs(cpu: &mut Cpu) {}
+    pub fn clc(cpu: &mut Cpu) {}
+    pub fn cld(cpu: &mut Cpu) {}
+    pub fn cli(cpu: &mut Cpu) {}
+    pub fn clv(cpu: &mut Cpu) {}
+    pub fn cmp(cpu: &mut Cpu) {}
+    pub fn cpx(cpu: &mut Cpu) {}
+    pub fn cpy(cpu: &mut Cpu) {}
+    pub fn dec(cpu: &mut Cpu) {}
+    pub fn dex(cpu: &mut Cpu) {}
+    pub fn dey(cpu: &mut Cpu) {}
+    pub fn eor(cpu: &mut Cpu) {}
+    pub fn inc(cpu: &mut Cpu) {}
+    pub fn inx(cpu: &mut Cpu) {}
+    pub fn iny(cpu: &mut Cpu) {}
+    pub fn jmp(cpu: &mut Cpu) {}
+    pub fn jsr(cpu: &mut Cpu) {}
+    pub fn lda(cpu: &mut Cpu) {}
+    pub fn ldx(cpu: &mut Cpu) {}
+    pub fn ldy(cpu: &mut Cpu) {}
+    pub fn lsr(cpu: &mut Cpu) {}
+    pub fn nop(cpu: &mut Cpu) {}
+    pub fn ora(cpu: &mut Cpu) {}
+    pub fn pha(cpu: &mut Cpu) {}
+    pub fn php(cpu: &mut Cpu) {}
+    pub fn pla(cpu: &mut Cpu) {}
+    pub fn plp(cpu: &mut Cpu) {}
+    pub fn rol(cpu: &mut Cpu) {}
+    pub fn ror(cpu: &mut Cpu) {}
+    pub fn rti(cpu: &mut Cpu) {}
+    pub fn rts(cpu: &mut Cpu) {}
+    pub fn sbc(cpu: &mut Cpu) {}
+    pub fn sec(cpu: &mut Cpu) {}
+    pub fn sed(cpu: &mut Cpu) {}
+    pub fn sei(cpu: &mut Cpu) {}
+    pub fn sta(cpu: &mut Cpu) {}
+    pub fn stx(cpu: &mut Cpu) {}
+    pub fn sty(cpu: &mut Cpu) {}
+    pub fn tax(cpu: &mut Cpu) {}
+    pub fn tay(cpu: &mut Cpu) {}
+    pub fn tsx(cpu: &mut Cpu) {}
+    pub fn txa(cpu: &mut Cpu) {}
+    pub fn txs(cpu: &mut Cpu) {}
+    pub fn tya(cpu: &mut Cpu) {}
+}
 
 ///
 /// Addressing modes
 /// The 6502 cpu support different kinds of _addressing mode_/
 ///
 ///
+mod m6502_addressing_modes {
 
-fn absolute_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    use super::{Cpu, Byte, Address, Word, MainBus};
+    use std::cell::RefCell;
+    use std::rc::Rc;
 
-fn implied_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Implied** 
+    /// This addressing mode is the simplest one, because it is
+    /// use only with instructions which do not need any additional
+    /// context -- it is _implied_.
+    /// 
+    pub fn implied_am(cpu: &mut Cpu) {
+        let accumulator = cpu.regset().accumulator();
+        cpu.set_fetched(accumulator as u8);
+    }
 
-fn immediate_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Immediate**
+    /// This addressing mode is used when the next byte to be
+    /// used a value.
+    /// 
+    pub fn immediate_am(cpu: &mut Cpu) {
+        let next_address = cpu.regset().prog_counter() + 1;
+        cpu.set_next_address(next_address);
+        let fetched = cpu.read_byte(next_address);
+        cpu.set_fetched(fetched);
+    }
 
-fn zeropage_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Zero page**
+    /// 
+    /// In order to utilize the system capabilities more efficiently
+    /// it is possible to address _absolutely_ the first page of
+    /// memory _faster_ by providing a 8-bit number instead of 16-bit
+    /// for address value (6502 addresses are 16-bit).
+    /// 
+    pub fn zeropage_am(cpu: &mut Cpu) {
+        let next_address = Address::from(zeropage_next_address(cpu));
+        let fetched = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(fetched);
+    }
 
-fn zeropage_x_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Zero page with X offset**
+    /// 
+    /// Same as Zero page but indexes using the value inside
+    /// the X-index register. If the address is bigger than
+    /// the maximum of zero page, it wrapps around.
+    /// 
+    pub fn zeropage_x_am(cpu: &mut Cpu) {
+        let offset = cpu.regset().x_index() as Byte;
+        let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
+        let fetched = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(fetched);
+    } 
 
-fn zeropage_y_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Zero page with Y offset**
+    /// 
+    /// Same as Zero page with X offset but using the value
+    /// inside the Y-index register instead of the X-index.
+    /// 
+    pub fn zeropage_y_am(cpu: &mut Cpu) {
+        let offset = cpu.regset().y_index() as Byte;
+        let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
+        let fetched = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(fetched);
+    }
 
-fn absolute_x_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    /// A helper function, used with the zeropage 
+    /// addressing modes
+    fn zeropage_next_address(cpu: &mut Cpu) -> Byte {
+        let progcounter = cpu.regset().prog_counter();
+        *cpu.regset_mut().prog_counter_mut() += 1;
+        cpu.read_byte(progcounter)
+    }
 
-fn absolute_y_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Absolute**
+    /// Specifies the memory location explicitly in the two bytes
+    /// following the opcode. In order to fetch the value which
+    /// is going to be used, the full 16-bit address has to
+    /// acquired and then read from.
+    /// 
+    pub fn absolute_am(cpu: &mut Cpu) {
+        let next_address = absolute_next_address(cpu);
+        let value = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(value);
+    }
 
-fn relative_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    /// 
+    /// **Absolute with X offset**
+    /// 
+    /// Analogical to the absolute addressing mode but
+    /// uses the value of the X-index register as an offset
+    /// before actually reading the value.
+    pub fn absolute_x_am(cpu: &mut Cpu) {
+        let x_index = cpu.regset().x_index();
+        let next_address = absolute_next_address(cpu);
+        let offset_address = next_address + Address::from(x_index);
+        let value = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(value);
 
-fn indirect_am(cpu: &mut Cpu) -> Address {
-    0
-}
+        if next_address & 0xFF00 != offset_address & 0xFF00 {
+            mark_extra_clockcycle(cpu);
+        }
+    }
 
-fn indirect_x_am(cpu: &mut Cpu) -> Address {
-    0
-}
+    ///
+    /// **Absolute with Y offset**
+    /// 
+    /// Same as the absolute with X offset but uses the
+    /// Y-index register instead.
+    /// 
+    pub fn absolute_y_am(cpu: &mut Cpu) {
+        let y_index = cpu.regset().y_index();
+        let next_address = absolute_next_address(cpu);
+        let offset_address = next_address + Address::from(y_index);
+        let value = cpu.read_byte(offset_address);
+        cpu.set_next_address(offset_address);
+        cpu.set_fetched(value);
 
-fn indirect_y_am(cpu: &mut Cpu) -> Address {
-    0
+        if next_address & 0xFF00 != offset_address & 0xFF00 {
+            mark_extra_clockcycle(cpu);
+        }
+    }
+
+    /// A helper function, used with the absolute
+    /// addressing modes
+    fn absolute_next_address(cpu: &mut Cpu) -> Address {
+        let mut pc = cpu.regset().prog_counter();
+        let lo = cpu.read_byte(pc);    pc += 1;
+        let hi = cpu.read_byte(pc);    pc += 1;
+        let next_address = Address::from_le_bytes([lo, hi]);
+        *cpu.regset_mut().prog_counter_mut() = pc;
+        next_address
+    }
+
+    ///
+    /// **Relative**
+    /// 
+    /// The supplied byte is interpreted as a _signed offset_
+    /// This offset is then added to the program counter.
+    /// 
+    pub fn relative_am(cpu: &mut Cpu) {
+        let mut pc = cpu.regset().prog_counter();
+        let rel = cpu.read_byte(pc);
+        pc = pc.wrapping_add(signedbyte_to_word(rel)); 
+        cpu.set_next_address(pc);
+
+        let value = cpu.read_byte(pc); pc += 1;
+        cpu.set_fetched(value);
+        *cpu.regset_mut().prog_counter_mut() = pc;
+    }
+
+    fn signedbyte_to_word(p_num: Byte) -> Word {
+        let num = Word::from(p_num);
+        return if num & 0x80 != 0 {
+            num | 0xFF00
+        } else {
+            num
+        };
+    } 
+
+    ///
+    /// **Indirect**
+    /// 
+    /// The supplied 16-bit address is set as a value for the
+    /// program counter.
+    /// 
+    /// **NB:** This operation has a hardware bug when
+    /// a page boundary is crossed. 
+    pub fn indirect_am(cpu: &mut Cpu) {
+        let mut pc = cpu.regset().prog_counter();
+
+        let ptr_lo = cpu.read_byte(pc); pc += 1;
+        let ptr_hi = cpu.read_byte(pc); pc += 1;
+        let ptr = Address::from_le_bytes([ptr_lo, ptr_hi]);
+        *cpu.regset_mut().prog_counter_mut() = pc;
+
+        let next_address_lo = cpu.read_byte(ptr);
+        let next_address_hi = cpu.read_byte(if ptr_lo == 0x00FF { ptr & 0xFF00 } else { ptr + 1 });
+        let next_address = Address::from_le_bytes([next_address_lo, next_address_hi]);
+
+        let value = cpu.read_byte(next_address);
+        cpu.set_next_address(next_address);
+        cpu.set_fetched(value);
+    }
+
+    ///
+    /// **Indirect with X-index offset**
+    /// 
+    /// A 8-bit address is suplied. It is then offset
+    /// by the value of the X-index register to a
+    /// location in the zero page. Then the actual
+    /// address is read.
+    pub fn indirect_x_am(cpu: &mut Cpu) {
+        let mut pc = cpu.regset().prog_counter();
+        let base = cpu.read_byte(pc);    pc += 1;
+
+        let x_index = cpu.regset().x_index();
+        let offset = Address::from(base.wrapping_add(x_index));
+
+        let lo = cpu.read_byte(offset);
+        let hi = cpu.read_byte(offset + 1 & 0x00FF);
+
+        let next_address = Address::from_le_bytes([lo, hi]);
+        cpu.set_next_address(next_address);
+
+        let value = cpu.read_byte(next_address);
+        cpu.set_fetched(value);
+        *cpu.regset_mut().prog_counter_mut() = pc;
+    }
+
+    pub fn indirect_y_am(cpu: &mut Cpu)  {
+        let mut pc = cpu.regset().prog_counter();
+        let base = Address::from(cpu.read_byte(pc));
+        pc += 1;
+        *cpu.regset_mut().prog_counter_mut() = pc;
+
+        let lo = cpu.read_byte(base);
+        let hi = cpu.read_byte(base + 1 & 0x00FF);
+        let next_address = Address::from_le_bytes([lo, hi]);
+
+        let y_index = cpu.regset().y_index();
+        let offset_address = next_address.wrapping_add(y_index as Address);
+        cpu.set_next_address(offset_address);
+
+        if next_address & 0xFF00 != offset_address & 0xFF00 {
+            mark_extra_clockcycle(cpu);
+        }
+
+        let value = cpu.read_byte(offset_address);
+        cpu.set_fetched(value);
+    }
+
+    fn mark_extra_clockcycle(cpu: &mut Cpu) {
+        *cpu.time_mut().residual_mut() += 1;
+    }
+
+    #[cfg(test)]
+    mod test{
+        use super::*;
+
+        #[test]
+        fn test__implied_am() {
+            let mut cpu = Cpu::new_custompc(0x0000);
+            cpu.regset_mut().set_accumulator(0x1A);
+
+            implied_am(&mut cpu);
+
+            let fetched = cpu.fetched();
+            let accumulator = cpu.regset().accumulator();
+            let prog_counter = cpu.regset().prog_counter();
+
+            assert_eq!(fetched, accumulator);
+            assert_eq!(prog_counter, 0x0000);
+        }
+
+        #[test]
+        fn test__immediate_am() {
+            let mut cpu = Cpu::new_custompc(0x00FA - 1);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            let expected = 0xA;
+            cpu.writ_byte(0xFA, expected);
+
+            immediate_am(&mut cpu);
+
+            let fetched = cpu.fetched();
+            
+            assert_eq!(fetched, expected);
+        }
+
+        #[test]
+        fn test__zeropage_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x00, 0x35);
+            cpu.writ_byte(0x35, 0x10);
+
+            zeropage_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__zeropage_x_offset_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            *cpu.regset_mut().x_index_mut() = 3;
+
+            cpu.writ_byte(0x00, 0x35);
+            cpu.writ_byte(0x35 + 3, 0x10);
+
+            zeropage_x_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__zeropage_offset_wrapping_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            *cpu.regset_mut().y_index_mut() = 0xff;
+
+            cpu.writ_byte(0x00, 0x35);
+            cpu.writ_byte(0x35 - 1, 0x10);
+
+            zeropage_y_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__absolute_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x00, 0x10);
+            cpu.writ_byte(0x01, 0x02);
+            cpu.writ_byte(0x0210, 0x10);
+
+            absolute_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__absolute_offset_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().y_index_mut() = 0xA;
+
+            cpu.writ_byte(0x00, 0x10);
+            cpu.writ_byte(0x01, 0x02);
+            cpu.writ_byte(0x0210 + 0xA, 0x10);
+
+            absolute_y_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__relative_am_w_positive_number() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x00, 0x10);
+            cpu.writ_byte(0x10, 0x10);
+
+            relative_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__relative_am_w_negative_number() {
+            let mut cpu = Cpu::new_custompc(0x90);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x90, 0x80);
+            cpu.writ_byte(0x10, 0x10);
+
+            relative_am(&mut cpu);
+            let fetched = cpu.fetched();
+
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__indirect_am_page_cross() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x00, 0x11);
+            cpu.writ_byte(0x01, 0x10);
+
+            cpu.writ_byte(0x1011, 0x01);
+            cpu.writ_byte(0x1012, 0xFF);
+
+            indirect_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xFF01);
+        }
+
+        #[test]
+        fn test__indirect_am() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            cpu.writ_byte(0x00, 0xFF);
+            cpu.writ_byte(0x01, 0x10);
+
+            cpu.writ_byte(0x10FF, 0x01);
+            cpu.writ_byte(0x1000, 0xA7);
+
+            indirect_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xA701);
+        }
+
+        #[test]
+        fn test__indirect_xoffset_am_1() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().x_index_mut() = 0x04;
+
+            cpu.writ_byte(0x00, 0x20);
+
+            cpu.writ_byte(0x24, 0x74);
+            cpu.writ_byte(0x25, 0x20);
+            cpu.writ_byte(0x2074, 0x10);
+
+            indirect_x_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0x2074);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x10);
+        }
+
+        #[test]
+        fn test__indirect_xoffset_am_2() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().x_index_mut() = 0x10;
+
+            cpu.writ_byte(0x00, 0x25);
+
+            cpu.writ_byte(0x35, 0x01);
+            cpu.writ_byte(0x36, 0xA7);
+
+            cpu.writ_byte(0xA701, 0x19);
+
+            indirect_x_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xA701);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x19);
+        }
+
+        #[test]
+        fn test__indirect_xoffset_am_3() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().x_index_mut() = 0x01;
+
+            cpu.writ_byte(0x0000, 0xFE);
+            cpu.writ_byte(0x00FF, 0x01);
+
+            cpu.writ_byte(0xFE01, 0x17);
+
+            indirect_x_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xFE01);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x17);
+        }
+
+        #[test]
+        fn test__indirect_yoffset_am_1() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().y_index_mut() = 0x10;
+
+            cpu.writ_byte(0x0000, 0x25);
+            cpu.writ_byte(0x0025, 0xFF);
+            cpu.writ_byte(0x0026, 0xA7);
+
+            cpu.writ_byte(0xA80F, 0x34);
+
+            indirect_y_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xA80F);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x34);
+
+            let marked_extra_cycle = cpu.time.residual == 1;
+            assert_eq!(marked_extra_cycle, true);
+        }
+
+        #[test]
+        fn test__indirect_yoffset_am_2() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().y_index_mut() = 0x10;
+
+            cpu.writ_byte(0x0000, 0x25);
+            cpu.writ_byte(0x0025, 0x01);
+            cpu.writ_byte(0x0026, 0xA7);
+
+            cpu.writ_byte(0xA711, 0x34);
+
+            indirect_y_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0xA711);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x34);
+
+            let marked_extra_cycle = cpu.time.residual == 1;
+            assert_eq!(marked_extra_cycle, false);
+        }
+
+        #[test]
+        fn test__indirect_yoffset_am_3() {
+            let mut cpu = Cpu::new_custompc(0x00);
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+            *cpu.regset_mut().y_index_mut() = 0x10;
+
+            cpu.writ_byte(0x0000, 0x86);
+            cpu.writ_byte(0x0086, 0x28);
+            cpu.writ_byte(0x0087, 0x40);
+
+            cpu.writ_byte(0x4038, 0x37);
+
+            indirect_y_am(&mut cpu);
+
+            let next_address = cpu.next_address();
+            assert_eq!(next_address, 0x4038);
+
+            let fetched = cpu.fetched();
+            assert_eq!(fetched, 0x37);
+
+            let marked_extra_cycle = cpu.time.residual == 1;
+            assert_eq!(marked_extra_cycle, false);
+        }
+    }
 }
 
 /// Tests
