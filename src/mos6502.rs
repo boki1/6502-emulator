@@ -1,5 +1,3 @@
-#![feature(concat_idents)]
-
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -115,6 +113,13 @@ pub struct Timings {
     residual: u8,
 }
 
+impl Timings {
+    fn next(&mut self) {
+        *self.residual_mut() -= 1;
+        *self.elapsed_mut() += 1;
+    }
+}
+
 #[derive(Debug, Copy, Clone, PartialEq, Getters, CopyGetters, Setters, MutGetters, Default)]
 #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
 pub struct InterruptHandling {
@@ -122,12 +127,12 @@ pub struct InterruptHandling {
     pending_irq: bool,
 }
 
-// TODO:
-// Dev doc
-// Init properly
-const NmiVector: u16 = 0x0000;
-const IrqBrkVector: u16 = 0x0000;
-const ResetVector: u16 = 0x0000;
+/// **Jump vectors**
+/// In any of this exception cases - NMI, IRQ, BRK or a RESET, the PC should jump to the
+/// concrete address, also called _vector_.
+const NMI_VECTOR: Address = 0xfffa;
+const RESET_VECTOR: Address = 0xfffc;
+const IRQ_BRK_VECTOR: Address = 0xfffe;
 
 pub struct Cpu {
     regset: RegisterSet,
@@ -137,12 +142,16 @@ pub struct Cpu {
 }
 
 impl Cpu {
+    pub fn regset_mut(&mut self) -> &mut RegisterSet {
+        &mut self.regset
+    }
+
     pub fn regset(&self) -> &RegisterSet {
         &self.regset
     }
 
-    pub fn time(&self) -> &Timings {
-        &self.time
+    pub fn time_mut(&mut self) -> &mut Timings {
+        &mut self.time
     }
 
     pub fn interrupt_handles(&self) -> &InterruptHandling {
@@ -172,7 +181,35 @@ impl Cpu {
         }
     }
 
-    fn cycle(&self) {}
+    fn new_connected(bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>) -> Self {
+        Self {
+            bus_conn,
+            ..Cpu::new()
+        }
+    }
+
+    fn cycle(&mut self) {
+        // if !self.time.residual() {}
+
+        self.time_mut().next();
+
+    }
+
+    fn inthandle(&mut self) -> bool {
+        let nmi_flag: bool = self.interrupt_handles().pending_nmi();
+        let mut irq_flag: bool = self.interrupt_handles().pending_irq();
+        irq_flag &= !self.regset().irq_disabled();
+
+        let is_interrupted = nmi_flag || irq_flag;
+
+        if !is_interrupted {
+            return false;
+        }
+
+
+
+        return true;
+    }
 
     fn reset(&self) {}
 
@@ -200,8 +237,8 @@ impl Cpu {
     }
 
     fn read_word(&self, address: Address) -> Word {
-        let lo = self.read_byte(address) as u16;
-        let hi = self.read_byte(address + 1) as u16;
+        let lo = Word::from(self.read_byte(address));
+        let hi = Word::from(self.read_byte(address + 1));
         (hi << 8) | lo
     }
 }
@@ -217,7 +254,7 @@ pub trait CommunicationInterface {
     fn write(&mut self, address: Address, data: Byte);
 }
 
-const RamSize: usize = 0x1fff;
+const RAM_SIZE: usize = 0x07ff;
 
 /// The "host" of our cpu
 /// Contains the contexual environment of the processor, most notably - memory.
@@ -228,7 +265,7 @@ pub struct MainBus {
 impl MainBus {
     fn new() -> Self {
         Self {
-            mem: vec![0x0; RamSize],
+            mem: vec![0x0; RAM_SIZE],
         }
     }
 }
@@ -297,4 +334,63 @@ fn test__cpu_with_host() {
     let retval2 = cpu.read_byte(2);
     assert_eq!(retval1, 10);
     assert_eq!(retval2, 0);
+}
+
+//
+// Utility
+// 
+
+const STACK_OFFSET: Address = 0x100;
+
+impl Cpu {
+    fn stk_push(&mut self, data: Byte) {
+        let mut stk_ptr = self.regset().stk_ptr();
+        let addr = STACK_OFFSET + Address::from(stk_ptr);
+        self.writ_byte(addr, data);
+        stk_ptr = stk_ptr.wrapping_sub(1);
+        *self.regset_mut().stk_ptr_mut() = stk_ptr;
+    }
+
+    fn stk_doublepush(&mut self, data: Word) {
+        self.stk_push((data >> 8) as u8);
+        self.stk_push((data) as u8);
+    }
+
+    fn stk_pop(&mut self) -> Byte {
+        let mut stk_ptr = self.regset().stk_ptr();
+        stk_ptr = stk_ptr.wrapping_add(1);
+        let addr = STACK_OFFSET + Address::from(stk_ptr);
+        let data = self.read_byte(addr);
+        *self.regset_mut().stk_ptr_mut() = stk_ptr;
+        data
+    }
+}
+
+#[test]
+fn test__stk_operations() {
+    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+
+    cpu.stk_push(0xcd);
+    let cd = Word::from(cpu.stk_pop());
+    assert_eq!(cd, 0xcd);
+
+    cpu.stk_push(0xab);
+    let ab = Word::from(cpu.stk_pop());
+    assert_eq!(ab, 0xab);
+}
+
+#[test]
+fn test__stk_operations_double() {
+    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+    let data: Word = 0xabcd;
+    cpu.stk_doublepush(data);
+
+    let cd = Word::from(cpu.stk_pop());
+    assert_eq!(cd, 0xcd);
+
+    let ab = Word::from(cpu.stk_pop());
+    assert_eq!(ab, 0xab);
+
+    let reassembled = ab << 8 | cd;
+    assert_eq!(reassembled, 0xabcd);
 }
