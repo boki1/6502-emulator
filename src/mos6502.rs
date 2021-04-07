@@ -1,3 +1,4 @@
+use std::fmt::Debug;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -7,7 +8,7 @@ pub type Word = u16;
 pub type Opcode = u8;
 pub type Byte = u8;
 
-pub type AddressingModeFn = fn(&mut Cpu);
+pub type AddressingModeFn = fn(&mut Cpu)-> Result<InstructionResult, CpuError> ;
 pub type InstructionFn = fn(&mut Cpu);
 
 /// This structure represents the registers each MOS 6502 has.
@@ -147,34 +148,52 @@ const IRQ_BRK_VECTOR: Address = 0xfffe;
 
 #[derive(Getters, CopyGetters, Setters, MutGetters)]
 pub struct Cpu {
+    #[getset(get_copy = "pub", get_mut = "pub")]
     regset: RegisterSet,
+
+    #[getset(get_copy = "pub", get_mut = "pub")]
     time: Timings,
+
     inter: InterruptHandling,
+
     bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>,
 
-    // Helper fields
-    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
-    fetched: Byte,
+    #[getset(get_mut = "pub")]
+    current_instruction: Option<Instruction>,
+}
 
-    #[getset(get_copy = "pub", set = "pub", get_mut = "pub")]
-    next_address: Address
+pub enum CpuError {
+    BusInterfaceMissing,
 }
 
 impl Cpu {
-    pub fn regset_mut(&mut self) -> &mut RegisterSet {
-        &mut self.regset
+
+    /// Acts as post-fix increment operation (pc++):
+    /// Increments the Program Counter and returns the **old** value.
+    #[inline]
+    fn inc_pc(&mut self) -> Word {
+        let old_pc = self.regset.prog_counter;
+        self.regset.prog_counter += 1;
+        old_pc
+    } 
+
+    fn pc(&self) -> Word {
+        self.regset.prog_counter
     }
 
-    pub fn regset(&self) -> &RegisterSet {
-        &self.regset
-    }
-
-    pub fn time_mut(&mut self) -> &mut Timings {
-        &mut self.time
-    }
-
-    pub fn interrupt_handles(&self) -> &InterruptHandling {
+    fn interrupt_handles(&self) -> &InterruptHandling {
         &self.inter
+    }
+
+    /// Given a result of an operation, try to set it as a result in
+    /// the current instruction if one is present. Return according
+    /// to the success of the update.
+    fn try_set_instruction_result(&mut self, result: InstructionResult) -> Result<InstructionResult, CpuError> {
+        if let Some(i) = &mut self.current_instruction {
+            (*i).result = result.clone();
+            return Ok(result);
+        }
+        Err(CpuError::BusInterfaceMissing)
     }
 }
 
@@ -197,8 +216,7 @@ impl Cpu {
                 pending_nmi: false,
             },
             bus_conn: None,
-            fetched: 0x00,
-            next_address: 0x0000
+            current_instruction: None,
         }
     }
 
@@ -274,6 +292,8 @@ impl Cpu {
 }
 
 impl Cpu {
+
+    /// 
     /// **read_byte()** - Initiates a read request to the interface
     /// **if one is present**
     fn read_byte(&self, address: Address) -> Byte {
@@ -285,6 +305,7 @@ impl Cpu {
         0
     }
 
+    /// 
     /// **writ_byte()** - Initiates a write request to the interface
     /// **if one is present**
     fn writ_byte(&self, address: Address, data: Byte) {
@@ -293,6 +314,7 @@ impl Cpu {
         }
     }
 
+    /// 
     /// **read_word()** - Wrapper function for reading two sequential
     /// bytes from the interface **if one is present**.
     fn read_word(&self, address: Address) -> Word {
@@ -301,6 +323,7 @@ impl Cpu {
         Word::from_le_bytes([lo, hi])
     }
 
+    /// 
     /// **read_some()** - Reads sequence of bytes from the interface
     fn read_some(&self, address: Address, len: u16) -> Vec<Byte> {
         if let Some(bus) = &self.bus_conn {
@@ -386,6 +409,7 @@ impl CommunicationInterface for MainBus {
 /// **make_instr!** - Makes a new Instruction instance with
 /// given field values
 ///
+#[macro_export]
 macro_rules! make_instr {
     ($p_amode: ident, $p_fun: ident, $p_time: expr, $p_mnemonic: literal, $p_size: expr) => {
         Instruction {
@@ -394,6 +418,8 @@ macro_rules! make_instr {
             time: $p_time,
             mnemonic: String::from($p_mnemonic),
             size: $p_size,
+            result: InstructionResult::NotExecuted,
+            operand: None
         }
     };
 }
@@ -408,12 +434,65 @@ macro_rules! make_illegal {
     };
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum InstructionResult {
+    Fetched(Byte),
+    AbsoluteAddress(Word),
+    NotExecuted,
+}
+
+///
+/// Instruction
+/// 
+/// This structure represents a single operatation in
+/// the 6502 cpu. It contains meta information about
+/// the instruction such as its addressing mode and
+/// its time to execute and some information about
+/// its surroundings. The context contains information
+/// such as the operand used and its final result
+/// which might be a value (Fetched) or a address
+/// (Absolute Address).
 struct Instruction {
+
+    /// 
+    /// Meta information
     amode: AddressingModeFn,
     fun: InstructionFn,
     time: u16,
     mnemonic: String,
-    size: Byte,
+    size: u16,
+
+    /// Instruction context
+    /// 
+    /// **operand** contains the value of the
+    /// operands this instruction is using. They
+    /// might be either zero or one element.
+    /// 
+    /// **result** contains the "output" of the
+    /// this instruction. It might be either an
+    /// address or a value fetched from memory.
+    operand: Option<Word>,
+    result: InstructionResult,
+}
+
+impl Debug for Instruction {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::result::Result<(), std::fmt::Error> {
+        f.debug_struct("Instruction")
+            .field("time", &self.time)
+            .field("mnemonic", &self.mnemonic)
+            .field("size", &self.size)
+            .finish()
+    }
+}
+
+impl PartialEq for Instruction {
+    fn eq(&self, other: &Self) -> bool {
+        self.time == other.time &&
+        self.mnemonic == other.mnemonic &&
+        self.size == other.size &&
+        self.fun as usize == other.fun as usize &&
+        self.amode as usize == other.amode as usize
+    }
 }
 
 impl Instruction {
@@ -425,9 +504,9 @@ impl Instruction {
     ///
     /// **NB:** Illegal opcodes are not supported as of now
     ///
-    fn decode_by(opcode: Opcode) -> Instruction {
-        use m6502_intruction_set::*;
+    fn decode_by(opcode: Byte) -> Instruction {
         use m6502_addressing_modes::*;
+        use m6502_intruction_set::*;
 
         return match opcode {
             // opcode => make_instr! (
@@ -435,7 +514,7 @@ impl Instruction {
             //              instruction,
             //              cycles,
             //              instruction_name,
-            //              size 
+            //              size
             //          )
             0x00 => make_instr!(implied_am, brk, 7, "brk", 1),
             0x01 => make_instr!(indirect_x_am, ora, 6, "ora", 2),
@@ -607,7 +686,6 @@ impl Instruction {
             _ => make_illegal!(),
         };
     }
-
 }
 
 ///
@@ -617,62 +695,62 @@ impl Instruction {
 mod m6502_intruction_set {
     use super::Cpu;
 
-    pub fn adc(cpu: &mut Cpu) {}
-    pub fn and(cpu: &mut Cpu) {}
-    pub fn asl(cpu: &mut Cpu) {}
-    pub fn bcc(cpu: &mut Cpu) {}
-    pub fn bcs(cpu: &mut Cpu) {}
-    pub fn beq(cpu: &mut Cpu) {}
-    pub fn bit(cpu: &mut Cpu) {}
-    pub fn bmi(cpu: &mut Cpu) {}
-    pub fn bne(cpu: &mut Cpu) {}
-    pub fn bpl(cpu: &mut Cpu) {}
-    pub fn brk(cpu: &mut Cpu) {}
-    pub fn bvc(cpu: &mut Cpu) {}
-    pub fn bvs(cpu: &mut Cpu) {}
-    pub fn clc(cpu: &mut Cpu) {}
-    pub fn cld(cpu: &mut Cpu) {}
-    pub fn cli(cpu: &mut Cpu) {}
-    pub fn clv(cpu: &mut Cpu) {}
-    pub fn cmp(cpu: &mut Cpu) {}
-    pub fn cpx(cpu: &mut Cpu) {}
-    pub fn cpy(cpu: &mut Cpu) {}
-    pub fn dec(cpu: &mut Cpu) {}
-    pub fn dex(cpu: &mut Cpu) {}
-    pub fn dey(cpu: &mut Cpu) {}
-    pub fn eor(cpu: &mut Cpu) {}
-    pub fn inc(cpu: &mut Cpu) {}
-    pub fn inx(cpu: &mut Cpu) {}
-    pub fn iny(cpu: &mut Cpu) {}
-    pub fn jmp(cpu: &mut Cpu) {}
-    pub fn jsr(cpu: &mut Cpu) {}
-    pub fn lda(cpu: &mut Cpu) {}
-    pub fn ldx(cpu: &mut Cpu) {}
-    pub fn ldy(cpu: &mut Cpu) {}
-    pub fn lsr(cpu: &mut Cpu) {}
-    pub fn nop(cpu: &mut Cpu) {}
-    pub fn ora(cpu: &mut Cpu) {}
-    pub fn pha(cpu: &mut Cpu) {}
-    pub fn php(cpu: &mut Cpu) {}
-    pub fn pla(cpu: &mut Cpu) {}
-    pub fn plp(cpu: &mut Cpu) {}
-    pub fn rol(cpu: &mut Cpu) {}
-    pub fn ror(cpu: &mut Cpu) {}
-    pub fn rti(cpu: &mut Cpu) {}
-    pub fn rts(cpu: &mut Cpu) {}
-    pub fn sbc(cpu: &mut Cpu) {}
-    pub fn sec(cpu: &mut Cpu) {}
-    pub fn sed(cpu: &mut Cpu) {}
-    pub fn sei(cpu: &mut Cpu) {}
-    pub fn sta(cpu: &mut Cpu) {}
-    pub fn stx(cpu: &mut Cpu) {}
-    pub fn sty(cpu: &mut Cpu) {}
-    pub fn tax(cpu: &mut Cpu) {}
-    pub fn tay(cpu: &mut Cpu) {}
-    pub fn tsx(cpu: &mut Cpu) {}
-    pub fn txa(cpu: &mut Cpu) {}
-    pub fn txs(cpu: &mut Cpu) {}
-    pub fn tya(cpu: &mut Cpu) {}
+    pub fn adc(_cpu: &mut Cpu) {}
+    pub fn and(_cpu: &mut Cpu) {}
+    pub fn asl(_cpu: &mut Cpu) {}
+    pub fn bcc(_cpu: &mut Cpu) {}
+    pub fn bcs(_cpu: &mut Cpu) {}
+    pub fn beq(_cpu: &mut Cpu) {}
+    pub fn bit(_cpu: &mut Cpu) {}
+    pub fn bmi(_cpu: &mut Cpu) {}
+    pub fn bne(_cpu: &mut Cpu) {}
+    pub fn bpl(_cpu: &mut Cpu) {}
+    pub fn brk(_cpu: &mut Cpu) {}
+    pub fn bvc(_cpu: &mut Cpu) {}
+    pub fn bvs(_cpu: &mut Cpu) {}
+    pub fn clc(_cpu: &mut Cpu) {}
+    pub fn cld(_cpu: &mut Cpu) {}
+    pub fn cli(_cpu: &mut Cpu) {}
+    pub fn clv(_cpu: &mut Cpu) {}
+    pub fn cmp(_cpu: &mut Cpu) {}
+    pub fn cpx(_cpu: &mut Cpu) {}
+    pub fn cpy(_cpu: &mut Cpu) {}
+    pub fn dec(_cpu: &mut Cpu) {}
+    pub fn dex(_cpu: &mut Cpu) {}
+    pub fn dey(_cpu: &mut Cpu) {}
+    pub fn eor(_cpu: &mut Cpu) {}
+    pub fn inc(_cpu: &mut Cpu) {}
+    pub fn inx(_cpu: &mut Cpu) {}
+    pub fn iny(_cpu: &mut Cpu) {}
+    pub fn jmp(_cpu: &mut Cpu) {}
+    pub fn jsr(_cpu: &mut Cpu) {}
+    pub fn lda(_cpu: &mut Cpu) {}
+    pub fn ldx(_cpu: &mut Cpu) {}
+    pub fn ldy(_cpu: &mut Cpu) {}
+    pub fn lsr(_cpu: &mut Cpu) {}
+    pub fn nop(_cpu: &mut Cpu) {}
+    pub fn ora(_cpu: &mut Cpu) {}
+    pub fn pha(_cpu: &mut Cpu) {}
+    pub fn php(_cpu: &mut Cpu) {}
+    pub fn pla(_cpu: &mut Cpu) {}
+    pub fn plp(_cpu: &mut Cpu) {}
+    pub fn rol(_cpu: &mut Cpu) {}
+    pub fn ror(_cpu: &mut Cpu) {}
+    pub fn rti(_cpu: &mut Cpu) {}
+    pub fn rts(_cpu: &mut Cpu) {}
+    pub fn sbc(_cpu: &mut Cpu) {}
+    pub fn sec(_cpu: &mut Cpu) {}
+    pub fn sed(_cpu: &mut Cpu) {}
+    pub fn sei(_cpu: &mut Cpu) {}
+    pub fn sta(_cpu: &mut Cpu) {}
+    pub fn stx(_cpu: &mut Cpu) {}
+    pub fn sty(_cpu: &mut Cpu) {}
+    pub fn tax(_cpu: &mut Cpu) {}
+    pub fn tay(_cpu: &mut Cpu) {}
+    pub fn tsx(_cpu: &mut Cpu) {}
+    pub fn txa(_cpu: &mut Cpu) {}
+    pub fn txs(_cpu: &mut Cpu) {}
+    pub fn tya(_cpu: &mut Cpu) {}
 }
 
 ///
@@ -682,210 +760,212 @@ mod m6502_intruction_set {
 ///
 mod m6502_addressing_modes {
 
-    use super::{Cpu, Byte, Address, Word, MainBus};
+    use super::{Address, Byte, Word};
+    use super::{InstructionResult, InstructionResult::*, CpuError};
+    use super::{Cpu, Instruction, MainBus};
+
     use std::cell::RefCell;
     use std::rc::Rc;
 
     ///
-    /// **Implied** 
+    /// **Implied**
     /// This addressing mode is the simplest one, because it is
     /// use only with instructions which do not need any additional
     /// context -- it is _implied_.
-    /// 
-    pub fn implied_am(cpu: &mut Cpu) {
+    ///
+    pub fn implied_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let accumulator = cpu.regset().accumulator();
-        cpu.set_fetched(accumulator as u8);
+        let fetched = Fetched(accumulator);
+
+        cpu.try_set_instruction_result(fetched)
     }
 
     ///
     /// **Immediate**
     /// This addressing mode is used when the next byte to be
     /// used a value.
-    /// 
-    pub fn immediate_am(cpu: &mut Cpu) {
+    ///
+    pub fn immediate_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let next_address = cpu.regset().prog_counter() + 1;
-        cpu.set_next_address(next_address);
-        let fetched = cpu.read_byte(next_address);
-        cpu.set_fetched(fetched);
+        let value = cpu.read_byte(next_address);
+        cpu.inc_pc();
+
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
     ///
     /// **Zero page**
-    /// 
+    ///
     /// In order to utilize the system capabilities more efficiently
     /// it is possible to address _absolutely_ the first page of
     /// memory _faster_ by providing a 8-bit number instead of 16-bit
     /// for address value (6502 addresses are 16-bit).
-    /// 
-    pub fn zeropage_am(cpu: &mut Cpu) {
+    ///
+    pub fn zeropage_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let next_address = Address::from(zeropage_next_address(cpu));
-        let fetched = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(fetched);
+        let value = cpu.read_byte(next_address);
+
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
     ///
     /// **Zero page with X offset**
-    /// 
+    ///
     /// Same as Zero page but indexes using the value inside
     /// the X-index register. If the address is bigger than
     /// the maximum of zero page, it wrapps around.
-    /// 
-    pub fn zeropage_x_am(cpu: &mut Cpu) {
+    ///
+    pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let offset = cpu.regset().x_index() as Byte;
         let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
-        let fetched = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(fetched);
-    } 
+        let value = cpu.read_byte(next_address);
+
+        cpu.try_set_instruction_result(Fetched(value))
+    }
 
     ///
     /// **Zero page with Y offset**
-    /// 
+    ///
     /// Same as Zero page with X offset but using the value
     /// inside the Y-index register instead of the X-index.
-    /// 
-    pub fn zeropage_y_am(cpu: &mut Cpu) {
+    ///
+    pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let offset = cpu.regset().y_index() as Byte;
         let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
-        let fetched = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(fetched);
+        let value = cpu.read_byte(next_address);
+
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
-    /// A helper function, used with the zeropage 
+    /// A helper function, used with the zeropage
     /// addressing modes
     fn zeropage_next_address(cpu: &mut Cpu) -> Byte {
-        let progcounter = cpu.regset().prog_counter();
-        *cpu.regset_mut().prog_counter_mut() += 1;
-        cpu.read_byte(progcounter)
+        let pc = cpu.inc_pc();
+        cpu.read_byte(pc)
     }
 
     ///
     /// **Absolute**
     /// Specifies the memory location explicitly in the two bytes
     /// following the opcode. In order to fetch the value which
-    /// is going to be used, the full 16-bit address has to
+    /// is going to be used, the full 16-bit address has to be
     /// acquired and then read from.
-    /// 
-    pub fn absolute_am(cpu: &mut Cpu) {
+    ///
+    pub fn absolute_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let next_address = absolute_next_address(cpu);
         let value = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(value);
+        
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
-    /// 
+    ///
     /// **Absolute with X offset**
-    /// 
+    ///
     /// Analogical to the absolute addressing mode but
     /// uses the value of the X-index register as an offset
     /// before actually reading the value.
-    pub fn absolute_x_am(cpu: &mut Cpu) {
+    pub fn absolute_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let x_index = cpu.regset().x_index();
         let next_address = absolute_next_address(cpu);
         let offset_address = next_address + Address::from(x_index);
         let value = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(value);
 
         if next_address & 0xFF00 != offset_address & 0xFF00 {
             mark_extra_clockcycle(cpu);
         }
+
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
     ///
     /// **Absolute with Y offset**
-    /// 
+    ///
     /// Same as the absolute with X offset but uses the
     /// Y-index register instead.
-    /// 
-    pub fn absolute_y_am(cpu: &mut Cpu) {
+    ///
+    /// FIXME: Consider extracting common logic with `absolute_x_am`
+    /// into a helping routine.
+    pub fn absolute_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
         let y_index = cpu.regset().y_index();
         let next_address = absolute_next_address(cpu);
         let offset_address = next_address + Address::from(y_index);
         let value = cpu.read_byte(offset_address);
-        cpu.set_next_address(offset_address);
-        cpu.set_fetched(value);
 
         if next_address & 0xFF00 != offset_address & 0xFF00 {
             mark_extra_clockcycle(cpu);
         }
+
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
     /// A helper function, used with the absolute
     /// addressing modes
     fn absolute_next_address(cpu: &mut Cpu) -> Address {
-        let mut pc = cpu.regset().prog_counter();
-        let lo = cpu.read_byte(pc);    pc += 1;
-        let hi = cpu.read_byte(pc);    pc += 1;
+        let pc = cpu.inc_pc();
+        let lo = cpu.read_byte(pc);
+        let pc = cpu.inc_pc();
+        let hi = cpu.read_byte(pc);
         let next_address = Address::from_le_bytes([lo, hi]);
-        *cpu.regset_mut().prog_counter_mut() = pc;
         next_address
     }
 
     ///
     /// **Relative**
-    /// 
+    ///
     /// The supplied byte is interpreted as a _signed offset_
     /// This offset is then added to the program counter.
-    /// 
-    pub fn relative_am(cpu: &mut Cpu) {
-        let mut pc = cpu.regset().prog_counter();
-        let rel = cpu.read_byte(pc);
-        pc = pc.wrapping_add(signedbyte_to_word(rel)); 
-        cpu.set_next_address(pc);
+    ///
+    pub fn relative_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
+        let mut pc = cpu.pc();
+        let offset = cpu.read_byte(pc);
+        pc = pc.wrapping_add(signedbyte_to_word(offset));
 
-        let value = cpu.read_byte(pc); pc += 1;
-        cpu.set_fetched(value);
-        *cpu.regset_mut().prog_counter_mut() = pc;
+        cpu.try_set_instruction_result(AbsoluteAddress(pc))
+
     }
 
     fn signedbyte_to_word(p_num: Byte) -> Word {
         let num = Word::from(p_num);
-        return if num & 0x80 != 0 {
-            num | 0xFF00
-        } else {
-            num
-        };
-    } 
+        return if num & 0x80 != 0 { num | 0xFF00 } else { num };
+    }
 
     ///
-    /// **Indirect**
-    /// 
+    /// **Indirect**\
+    /// \
     /// The supplied 16-bit address is set as a value for the
     /// program counter.
-    /// 
-    /// **NB:** This operation has a hardware bug when
-    /// a page boundary is crossed. 
-    pub fn indirect_am(cpu: &mut Cpu) {
-        let mut pc = cpu.regset().prog_counter();
-
-        let ptr_lo = cpu.read_byte(pc); pc += 1;
-        let ptr_hi = cpu.read_byte(pc); pc += 1;
+    /// \
+    /// **NB:**\
+    /// This operation has a hardware bug when
+    /// a page boundary is crossed.
+    pub fn indirect_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
+        let pc = cpu.inc_pc();
+        let ptr_lo = cpu.read_byte(pc);
+        let pc = cpu.inc_pc();
+        let ptr_hi = cpu.read_byte(pc);
         let ptr = Address::from_le_bytes([ptr_lo, ptr_hi]);
-        *cpu.regset_mut().prog_counter_mut() = pc;
+
+        // Simulate hardware bug
+        let page_crossed = ptr_lo == 0x00FF;
+        let address_of_next_hi = if page_crossed { ptr & 0xFF00 } else { ptr + 1 };
 
         let next_address_lo = cpu.read_byte(ptr);
-        let next_address_hi = cpu.read_byte(if ptr_lo == 0x00FF { ptr & 0xFF00 } else { ptr + 1 });
-        let next_address = Address::from_le_bytes([next_address_lo, next_address_hi]);
+        let next_address_hi = cpu.read_byte(address_of_next_hi);
 
-        let value = cpu.read_byte(next_address);
-        cpu.set_next_address(next_address);
-        cpu.set_fetched(value);
+        let next_address = Address::from_le_bytes([next_address_lo, next_address_hi]);
+        cpu.try_set_instruction_result(AbsoluteAddress(next_address))
     }
 
     ///
     /// **Indirect with X-index offset**
-    /// 
+    ///
     /// A 8-bit address is suplied. It is then offset
     /// by the value of the X-index register to a
     /// location in the zero page. Then the actual
     /// address is read.
-    pub fn indirect_x_am(cpu: &mut Cpu) {
-        let mut pc = cpu.regset().prog_counter();
-        let base = cpu.read_byte(pc);    pc += 1;
-
+    pub fn indirect_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
+        let pc = cpu.inc_pc();
+        let base = cpu.read_byte(pc);
         let x_index = cpu.regset().x_index();
         let offset = Address::from(base.wrapping_add(x_index));
 
@@ -893,18 +973,13 @@ mod m6502_addressing_modes {
         let hi = cpu.read_byte(offset + 1 & 0x00FF);
 
         let next_address = Address::from_le_bytes([lo, hi]);
-        cpu.set_next_address(next_address);
-
         let value = cpu.read_byte(next_address);
-        cpu.set_fetched(value);
-        *cpu.regset_mut().prog_counter_mut() = pc;
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
-    pub fn indirect_y_am(cpu: &mut Cpu)  {
-        let mut pc = cpu.regset().prog_counter();
+    pub fn indirect_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
+        let pc = cpu.inc_pc();
         let base = Address::from(cpu.read_byte(pc));
-        pc += 1;
-        *cpu.regset_mut().prog_counter_mut() = pc;
 
         let lo = cpu.read_byte(base);
         let hi = cpu.read_byte(base + 1 & 0x00FF);
@@ -912,14 +987,13 @@ mod m6502_addressing_modes {
 
         let y_index = cpu.regset().y_index();
         let offset_address = next_address.wrapping_add(y_index as Address);
-        cpu.set_next_address(offset_address);
 
         if next_address & 0xFF00 != offset_address & 0xFF00 {
             mark_extra_clockcycle(cpu);
         }
 
         let value = cpu.read_byte(offset_address);
-        cpu.set_fetched(value);
+        cpu.try_set_instruction_result(Fetched(value))
     }
 
     fn mark_extra_clockcycle(cpu: &mut Cpu) {
@@ -927,315 +1001,247 @@ mod m6502_addressing_modes {
     }
 
     #[cfg(test)]
-    mod test{
+    mod test {
         use super::*;
+
+        /// A setup() routine for all tests.
+        /// Each one of them requires a customely specified PC
+        /// and each on of them sets a "random" current instructrion
+        fn setup(custom_pc: Word, connect: bool) -> Cpu {
+            let mut cpu = Cpu::new_custompc(custom_pc);
+
+            // Set a random instruction as current, because it 
+            // doesn't matter which but only that there is one.
+            if cpu.current_instruction.is_none() {
+                cpu.current_instruction = Some(Instruction::decode_by(0x08));
+            }
+
+            if connect {
+                cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            }
+
+            cpu
+        }
 
         #[test]
         fn test__implied_am() {
-            let mut cpu = Cpu::new_custompc(0x0000);
+            let mut cpu = setup(0x0000, false);
             cpu.regset_mut().set_accumulator(0x1A);
 
-            implied_am(&mut cpu);
+            let result = implied_am(&mut cpu);
 
-            let fetched = cpu.fetched();
-            let accumulator = cpu.regset().accumulator();
-            let prog_counter = cpu.regset().prog_counter();
-
-            assert_eq!(fetched, accumulator);
-            assert_eq!(prog_counter, 0x0000);
+            assert_eq!(result.ok(), Some(Fetched(0x1A)));
+            assert_eq!(cpu.pc(), 0x0000);
         }
 
         #[test]
         fn test__immediate_am() {
-            let mut cpu = Cpu::new_custompc(0x00FA - 1);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            let mut cpu = setup(0x00FA - 1, true);
+            cpu.writ_byte(0xFA, 0x10);
 
-            let expected = 0xA;
-            cpu.writ_byte(0xFA, expected);
+            let result = immediate_am(&mut cpu);
 
-            immediate_am(&mut cpu);
-
-            let fetched = cpu.fetched();
-            
-            assert_eq!(fetched, expected);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(cpu.pc(), 0x00FA);
         }
 
         #[test]
         fn test__zeropage_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x0000, true);
             cpu.writ_byte(0x00, 0x35);
             cpu.writ_byte(0x35, 0x10);
 
-            zeropage_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = zeropage_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__zeropage_x_offset_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().x_index_mut() = 3;
-
             cpu.writ_byte(0x00, 0x35);
             cpu.writ_byte(0x35 + 3, 0x10);
 
-            zeropage_x_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = zeropage_x_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__zeropage_offset_wrapping_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().y_index_mut() = 0xff;
-
             cpu.writ_byte(0x00, 0x35);
             cpu.writ_byte(0x35 - 1, 0x10);
 
-            zeropage_y_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = zeropage_y_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__absolute_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            let mut cpu = setup(0x00, true);
 
             cpu.writ_byte(0x00, 0x10);
             cpu.writ_byte(0x01, 0x02);
             cpu.writ_byte(0x0210, 0x10);
 
-            absolute_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = absolute_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__absolute_offset_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().y_index_mut() = 0xA;
 
             cpu.writ_byte(0x00, 0x10);
             cpu.writ_byte(0x01, 0x02);
             cpu.writ_byte(0x0210 + 0xA, 0x10);
 
-            absolute_y_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = absolute_y_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__relative_am_w_positive_number() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            let mut cpu = setup(0x00, true);
 
             cpu.writ_byte(0x00, 0x10);
             cpu.writ_byte(0x10, 0x10);
 
-            relative_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = relative_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(AbsoluteAddress(0x10)));
         }
 
         #[test]
         fn test__relative_am_w_negative_number() {
-            let mut cpu = Cpu::new_custompc(0x90);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x90, true);
             cpu.writ_byte(0x90, 0x80);
             cpu.writ_byte(0x10, 0x10);
 
-            relative_am(&mut cpu);
-            let fetched = cpu.fetched();
+            let result = relative_am(&mut cpu);
 
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(AbsoluteAddress(0x10)));
         }
 
         #[test]
         fn test__indirect_am_page_cross() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             cpu.writ_byte(0x00, 0x11);
             cpu.writ_byte(0x01, 0x10);
-
             cpu.writ_byte(0x1011, 0x01);
             cpu.writ_byte(0x1012, 0xFF);
 
-            indirect_am(&mut cpu);
+            let result = indirect_am(&mut cpu);
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xFF01);
+            assert_eq!(result.ok(), Some(AbsoluteAddress(0xFF01)));
         }
 
         #[test]
         fn test__indirect_am() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             cpu.writ_byte(0x00, 0xFF);
             cpu.writ_byte(0x01, 0x10);
-
             cpu.writ_byte(0x10FF, 0x01);
             cpu.writ_byte(0x1000, 0xA7);
 
-            indirect_am(&mut cpu);
+            let result = indirect_am(&mut cpu);
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xA701);
+            assert_eq!(result.ok(), Some(AbsoluteAddress(0xA701)));
         }
 
         #[test]
         fn test__indirect_xoffset_am_1() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().x_index_mut() = 0x04;
-
             cpu.writ_byte(0x00, 0x20);
-
             cpu.writ_byte(0x24, 0x74);
             cpu.writ_byte(0x25, 0x20);
             cpu.writ_byte(0x2074, 0x10);
 
-            indirect_x_am(&mut cpu);
+            let result = indirect_x_am(&mut cpu);
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0x2074);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x10);
+            assert_eq!(result.ok(), Some(Fetched(0x10)));
         }
 
         #[test]
         fn test__indirect_xoffset_am_2() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().x_index_mut() = 0x10;
-
             cpu.writ_byte(0x00, 0x25);
-
             cpu.writ_byte(0x35, 0x01);
             cpu.writ_byte(0x36, 0xA7);
-
             cpu.writ_byte(0xA701, 0x19);
 
-            indirect_x_am(&mut cpu);
+            let result = indirect_x_am(&mut cpu);
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xA701);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x19);
+            assert_eq!(result.ok(), Some(Fetched(0x19)));
         }
 
         #[test]
         fn test__indirect_xoffset_am_3() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().x_index_mut() = 0x01;
-
             cpu.writ_byte(0x0000, 0xFE);
             cpu.writ_byte(0x00FF, 0x01);
-
             cpu.writ_byte(0xFE01, 0x17);
 
-            indirect_x_am(&mut cpu);
+            let result = indirect_x_am(&mut cpu);
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xFE01);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x17);
+            assert_eq!(result.ok(), Some(Fetched(0x17)));
         }
 
         #[test]
         fn test__indirect_yoffset_am_1() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().y_index_mut() = 0x10;
-
             cpu.writ_byte(0x0000, 0x25);
             cpu.writ_byte(0x0025, 0xFF);
             cpu.writ_byte(0x0026, 0xA7);
-
             cpu.writ_byte(0xA80F, 0x34);
 
-            indirect_y_am(&mut cpu);
-
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xA80F);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x34);
-
+            let result = indirect_y_am(&mut cpu);
             let marked_extra_cycle = cpu.time.residual == 1;
+
+            assert_eq!(result.ok(), Some(Fetched(0x34)));
             assert_eq!(marked_extra_cycle, true);
         }
 
         #[test]
         fn test__indirect_yoffset_am_2() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().y_index_mut() = 0x10;
-
             cpu.writ_byte(0x0000, 0x25);
             cpu.writ_byte(0x0025, 0x01);
             cpu.writ_byte(0x0026, 0xA7);
-
             cpu.writ_byte(0xA711, 0x34);
 
-            indirect_y_am(&mut cpu);
-
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0xA711);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x34);
-
+            let result = indirect_y_am(&mut cpu);
             let marked_extra_cycle = cpu.time.residual == 1;
+
+            assert_eq!(result.ok(), Some(Fetched(0x34)));
             assert_eq!(marked_extra_cycle, false);
         }
 
         #[test]
         fn test__indirect_yoffset_am_3() {
-            let mut cpu = Cpu::new_custompc(0x00);
-            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-
+            let mut cpu = setup(0x00, true);
             *cpu.regset_mut().y_index_mut() = 0x10;
-
             cpu.writ_byte(0x0000, 0x86);
             cpu.writ_byte(0x0086, 0x28);
             cpu.writ_byte(0x0087, 0x40);
-
             cpu.writ_byte(0x4038, 0x37);
 
-            indirect_y_am(&mut cpu);
+            let result = indirect_y_am(&mut cpu);
+            let marked_extra_cycle= cpu.time.residual == 1;
 
-            let next_address = cpu.next_address();
-            assert_eq!(next_address, 0x4038);
-
-            let fetched = cpu.fetched();
-            assert_eq!(fetched, 0x37);
-
-            let marked_extra_cycle = cpu.time.residual == 1;
+            assert_eq!(result.ok(), Some(Fetched(0x37)));
             assert_eq!(marked_extra_cycle, false);
         }
     }
@@ -1284,14 +1290,11 @@ impl Cpu {
         let mut result: Vec<Instruction> = Vec::new();
 
         let end = begin + limit;
-        for address in begin..end {
+        for mut address in begin..end {
             let opcode = self.read_byte(address);
-            let i = Instruction::decode_by(opcode); 
+            let i = Instruction::decode_by(opcode);
+            address += i.size;
             result.push(i);
-
-            // TODO: FIXME
-            // Add a "bytes" field to each Instruction in order to easily skip operands.
-            // address += i.bytes;
         }
 
         Ok(result)
@@ -1299,7 +1302,7 @@ impl Cpu {
 
     /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
     /// starting from `begin` in memory.
-    fn load_program(&mut self, program: Vec<Byte>, begin: Address, limit: u16) -> Result<(), ()> {
+    fn load_program(&mut self, program: &Vec<Byte>, begin: Address, limit: u16) -> Result<(), ()> {
         if self.bus_conn.is_none() {
             return Err(());
         }
@@ -1307,17 +1310,21 @@ impl Cpu {
         let end = begin + limit;
         for address in begin..end {
             let index = usize::from(address - begin);
-            self.writ_byte(address, program[index]);   
+            self.writ_byte(address, program[index]);
         }
 
-        Err(())
+        Ok(())
     }
 
     /// **load_file()**  - Given a filename of a binary source file, load the data in memory
     /// starting from address `begin`. If `start_it` is true, the program counter should
     /// be set to `begin` and execute the code.
-    fn load_file<'a>(&mut self, filename: &'a str, begin: Address, start_it: bool) -> Result<(), ()>{
-
+    fn load_file<'a>(
+        &mut self,
+        filename: &'a str,
+        begin: Address,
+        start_it: bool,
+    ) -> Result<(), ()> {
         // Read from file
 
         // return `load_program(binary_source, begin, binary_source.len())`
@@ -1329,7 +1336,6 @@ impl Cpu {
         Err(())
     }
 }
-
 
 #[cfg(test)]
 mod test {
@@ -1381,7 +1387,6 @@ mod test {
         assert_eq!(retval2, 0);
     }
 
-    
     #[test]
     fn test__stk_operations() {
         let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
@@ -1446,5 +1451,70 @@ mod test {
         assert_eq!(i.size, 2);
         assert_eq!(i.fun as usize, bpl as usize);
         assert_eq!(i.amode as usize, relative_am as usize);
+    }
+
+    #[test]
+    fn test__load_program() {
+        let mut cpu = Cpu::new_custompc(0x8000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+        let prog: Vec<Byte> = vec![
+            162, 10, 142, 0, 0, 162, 3, 142, 1, 0, 172, 0, 0, 169, 0, 24, 109, 1, 0, 136, 208, 250,
+            141, 2, 0, 234, 234, 234,
+        ];
+
+        // Loads this program (assembled [here](https://www.masswerk.at/6502/assembler.html))
+        //
+        // *=$8000 ; set PC=0x8000
+        // LDX #10
+        // STX $0000
+        // LDX #3
+        // STX $0001
+        // LDY $0000
+        // LDA #0
+        // CLC
+        // loop
+        // ADC $0001
+        // DEY
+        // BNE loop
+        // STA $0002
+        // NOP
+        // NOP
+        // NOP
+
+        let len = prog.len() as u16;
+
+        let res = cpu.load_program(&prog, 0x8000, len);
+        assert_eq!(res, Ok(()));
+
+        let read = cpu.read_some(0x8000, len);
+        assert_eq!(read, prog);
+    }
+
+    #[test]
+    fn test__load_program_and_disassemble() {
+        let mut cpu = Cpu::new_custompc(0x8000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+        let prog: Vec<Byte> = vec![
+            162, 10, 142, 0, 0, 162, 3, 142, 1, 0, 172, 0, 0, 169, 0, 24, 109, 1, 0, 136, 208, 250,
+            141, 2, 0, 234, 234, 234,
+        ];
+
+
+        let end = 0x8000 + prog.len() as u16;
+
+        let mut exprected_asm: Vec<Instruction> = Vec::new();
+        for opcode in prog.iter() {
+            let i = Instruction::decode_by(*opcode);
+            exprected_asm.push(i);
+        }
+
+        let asm_result = cpu.disassemble(0x8000, end);
+        assert!(asm_result.is_ok());
+
+        let asm = asm_result.unwrap();
+
+        assert_eq!(exprected_asm, asm);
     }
 }
