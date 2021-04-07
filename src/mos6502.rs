@@ -1247,11 +1247,13 @@ mod m6502_addressing_modes {
     }
 }
 
-//
-// Utility
-//
+///
+/// Utilities
+///
+/// Some additional functions needed for the cpu
+///
 
-const STACK_OFFSET: Address = 0x101;
+const STACK_OFFSET: Address = 0x100;
 
 impl Cpu {
     /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
@@ -1290,7 +1292,8 @@ impl Cpu {
         let mut result: Vec<Instruction> = Vec::new();
 
         let end = begin + limit;
-        for mut address in begin..end {
+        let mut address = begin;
+        while address < end {
             let opcode = self.read_byte(address);
             let i = Instruction::decode_by(opcode);
             address += i.size;
@@ -1495,26 +1498,12 @@ mod test {
     fn test__load_program_and_disassemble() {
         let mut cpu = Cpu::new_custompc(0x8000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+        let prog: Vec<Byte> = vec![ 162, 10, 142, 0, 0, 162, 3 ];
+        cpu.load_program(&prog, 0x8000, 7);
+        let expected_asm = vec![ Instruction::decode_by(162), Instruction::decode_by(142), Instruction::decode_by(162) ];
 
-        let prog: Vec<Byte> = vec![
-            162, 10, 142, 0, 0, 162, 3, 142, 1, 0, 172, 0, 0, 169, 0, 24, 109, 1, 0, 136, 208, 250,
-            141, 2, 0, 234, 234, 234,
-        ];
+        let asm = cpu.disassemble(0x8000, 7);
 
-
-        let end = 0x8000 + prog.len() as u16;
-
-        let mut exprected_asm: Vec<Instruction> = Vec::new();
-        for opcode in prog.iter() {
-            let i = Instruction::decode_by(*opcode);
-            exprected_asm.push(i);
-        }
-
-        let asm_result = cpu.disassemble(0x8000, end);
-        assert!(asm_result.is_ok());
-
-        let asm = asm_result.unwrap();
-
-        assert_eq!(exprected_asm, asm);
+        assert_eq!(asm.ok(), Some(expected_asm));
     }
 }
