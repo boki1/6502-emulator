@@ -4,7 +4,7 @@ use std::rc::Rc;
 
 pub type Address = u16;
 pub type Word = u16;
-pub type Opcode = u16;
+pub type Opcode = u8;
 pub type Byte = u8;
 
 pub type AddressingModeFn = fn(&mut Cpu);
@@ -600,6 +600,7 @@ impl Instruction {
             _ => make_illegal!(),
         };
     }
+
 }
 
 ///
@@ -1233,58 +1234,11 @@ mod m6502_addressing_modes {
     }
 }
 
-/// Tests
-
-#[test]
-fn test__create_cpu() {
-    let _ = Cpu::new();
-    assert!(true);
-}
-
-#[test]
-fn test__getters_fields() {
-    let mut regset = RegisterSet::new();
-    assert_eq!(regset.accumulator(), 0);
-    assert_eq!(regset.stk_ptr(), 0xfd);
-    regset.set_accumulator(1);
-    assert_eq!(regset.accumulator(), 1);
-}
-
-#[test]
-fn test__getters_and_setters_bits() {
-    let mut regset = RegisterSet::default();
-    let carry_is_set: bool = regset.carry();
-    assert_eq!(carry_is_set, false);
-
-    regset.set_carry(true);
-    let carry_is_set: bool = regset.carry();
-    assert_eq!(carry_is_set, true);
-}
-
-#[test]
-fn test__create_bus() {
-    let bus = MainBus::new();
-    assert_eq!(bus.mem[0], 0x0);
-}
-
-#[test]
-fn test__cpu_with_host() {
-    let mut bus = MainBus::new();
-    bus.write(1, 10);
-    let mut cpu = Cpu::new();
-    cpu.connect_to(Rc::new(RefCell::new(bus)));
-
-    let retval1 = cpu.read_byte(1);
-    let retval2 = cpu.read_byte(2);
-    assert_eq!(retval1, 10);
-    assert_eq!(retval2, 0);
-}
-
 //
 // Utility
 //
 
-const STACK_OFFSET: Address = 0x100;
+const STACK_OFFSET: Address = 0x101;
 
 impl Cpu {
     /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
@@ -1293,7 +1247,7 @@ impl Cpu {
         let mut stk_ptr = self.regset().stk_ptr();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         self.writ_byte(addr, data);
-        stk_ptr = stk_ptr.wrapping_sub(1);
+        stk_ptr = stk_ptr.wrapping_sub(2);
         *self.regset_mut().stk_ptr_mut() = stk_ptr;
     }
 
@@ -1303,74 +1257,182 @@ impl Cpu {
     }
 
     /// **stk_pop()** - Pops a byte from the stack stored in memory with offset `STACK_OFFSET`.
-    /// **NB:** This routine will fail if no 1 passed; 0 failinterface is connected.
+    /// **NB:** This routine will fail if no 2 passed; 0 failinterface is connected.
     fn stk_pop(&mut self) -> Byte {
         let mut stk_ptr = self.regset().stk_ptr();
-        stk_ptr = stk_ptr.wrapping_add(1);
+        stk_ptr = stk_ptr.wrapping_add(2);
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         let data = self.read_byte(addr);
         *self.regset_mut().stk_ptr_mut() = stk_ptr;
         data
     }
+
+    /// **disassemble()** - Given a beginning address, disassemble `limit` of bytes from memory
+    /// matching them to Instruction instances.
+    fn disassemble(&self, begin: Address, limit: Address) -> Result<Vec<Instruction>, ()> {
+        if self.bus_conn.is_none() {
+            return Err(());
+        }
+
+        let mut result: Vec<Instruction> = Vec::new();
+
+        let end = begin + limit;
+        for address in begin..end {
+            let opcode = self.read_byte(address);
+            let i = Instruction::decode_by(opcode); 
+            result.push(i);
+
+            // TODO: FIXME
+            // Add a "bytes" field to each Instruction in order to easily skip operands.
+            // address += i.bytes;
+        }
+
+        Ok(result)
+    }
+
+    /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
+    /// starting from `begin` in memory.
+    fn load_program(&mut self, program: Vec<Byte>, begin: Address, limit: u16) -> Result<(), ()> {
+        if self.bus_conn.is_none() {
+            return Err(());
+        }
+
+        let end = begin + limit;
+        for address in begin..end {
+            let index = usize::from(address - begin);
+            self.writ_byte(address, program[index]);   
+        }
+
+        Err(())
+    }
+
+    /// **load_file()**  - Given a filename of a binary source file, load the data in memory
+    /// starting from address `begin`. If `start_it` is true, the program counter should
+    /// be set to `begin` and execute the code.
+    fn load_file<'a>(&mut self, filename: &'a str, begin: Address, start_it: bool) -> Result<(), ()>{
+
+        // Read from file
+
+        // return `load_program(binary_source, begin, binary_source.len())`
+
+        if start_it {
+            // move `self.regset.prog_counter` to `begin`
+        }
+
+        Err(())
+    }
 }
 
-#[test]
-fn test__stk_operations() {
-    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
 
-    cpu.stk_push(0xcd);
-    let cd = cpu.stk_pop();
-    assert_eq!(cd, 0xcd);
+#[cfg(test)]
+mod test {
 
-    cpu.stk_push(0xab);
-    let ab = cpu.stk_pop();
-    assert_eq!(ab, 0xab);
-}
+    use super::*;
 
-#[test]
-fn test__stk_operations_double() {
-    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
-    let data: Word = 0xabcd;
-    cpu.stk_doublepush(data);
+    #[test]
+    fn test__create_cpu() {
+        let _ = Cpu::new();
+        assert!(true);
+    }
 
-    let cd = cpu.stk_pop();
-    assert_eq!(cd, 0xcd);
+    #[test]
+    fn test__getters_fields() {
+        let mut regset = RegisterSet::new();
+        assert_eq!(regset.accumulator(), 0);
+        assert_eq!(regset.stk_ptr(), 0xfd);
+        regset.set_accumulator(2);
+        assert_eq!(regset.accumulator(), 2);
+    }
 
-    let ab = cpu.stk_pop();
-    assert_eq!(ab, 0xab);
+    #[test]
+    fn test__getters_and_setters_bits() {
+        let mut regset = RegisterSet::default();
+        let carry_is_set: bool = regset.carry();
+        assert_eq!(carry_is_set, false);
 
-    let value = Word::from_le_bytes([cd, ab]);
-    assert_eq!(value, 0xabcd);
-}
+        regset.set_carry(true);
+        let carry_is_set: bool = regset.carry();
+        assert_eq!(carry_is_set, true);
+    }
 
-#[test]
-fn test__reset_cpu() {
-    let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
-    cpu.reset();
+    #[test]
+    fn test__create_bus() {
+        let bus = MainBus::new();
+        assert_eq!(bus.mem[0], 0x0);
+    }
 
-    let status_after_reset = cpu.regset().status();
-    let unused = status_after_reset & 1 << 5 != 0;
-    let overflowed = status_after_reset & 1 << 6 != 0;
-    let carry = status_after_reset & 1 << 1 != 0;
-    assert_eq!(unused, true);
-    assert_eq!(overflowed, false);
-    assert_eq!(carry, false);
-}
+    #[test]
+    fn test__cpu_with_host() {
+        let mut bus = MainBus::new();
+        bus.write(1, 10);
+        let mut cpu = Cpu::new();
+        cpu.connect_to(Rc::new(RefCell::new(bus)));
 
-#[test]
-fn test__read_seq_from_host() {
-    let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
-    let result = cpu.read_some(0x000, 0x7ff);
-    let expected_result = vec![0x00; 0x7ff];
-    assert_eq!(expected_result, result);
-}
+        let retval1 = cpu.read_byte(1);
+        let retval2 = cpu.read_byte(2);
+        assert_eq!(retval1, 10);
+        assert_eq!(retval2, 0);
+    }
 
-#[test]
-fn test__decode_by_correct() {
-    let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
-    let i = Instruction::decode_by(0x10);
+    
+    #[test]
+    fn test__stk_operations() {
+        let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
 
-    assert_eq!(i.mnemonic, "bpl".to_string());
-    assert_eq!(i.opcode, 0x10);
-    assert_eq!(i.time, 2);
+        cpu.stk_push(0xcd);
+        let cd = cpu.stk_pop();
+        assert_eq!(cd, 0xcd);
+
+        cpu.stk_push(0xab);
+        let ab = cpu.stk_pop();
+        assert_eq!(ab, 0xab);
+    }
+
+    #[test]
+    fn test__stk_operations_double() {
+        let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+        let data: Word = 0xabcd;
+        cpu.stk_doublepush(data);
+
+        let cd = cpu.stk_pop();
+        assert_eq!(cd, 0xcd);
+
+        let ab = cpu.stk_pop();
+        assert_eq!(ab, 0xab);
+
+        let value = Word::from_le_bytes([cd, ab]);
+        assert_eq!(value, 0xabcd);
+    }
+
+    #[test]
+    fn test__reset_cpu() {
+        let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+        cpu.reset();
+
+        let status_after_reset = cpu.regset().status();
+        let unused = status_after_reset & 1 << 5 != 0;
+        let overflowed = status_after_reset & 1 << 6 != 0;
+        let carry = status_after_reset & 1 << 1 != 0;
+        assert_eq!(unused, true);
+        assert_eq!(overflowed, false);
+        assert_eq!(carry, false);
+    }
+
+    #[test]
+    fn test__read_seq_from_host() {
+        let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+        let result = cpu.read_some(0x000, 0x7ff);
+        let expected_result = vec![0x00; 0x7ff];
+        assert_eq!(expected_result, result);
+    }
+
+    #[test]
+    fn test__decode_by_correct() {
+        let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
+        let i = Instruction::decode_by(0x10);
+
+        assert_eq!(i.mnemonic, "bpl".to_string());
+        assert_eq!(i.opcode, 0x10);
+        assert_eq!(i.time, 2);
+    }
 }
