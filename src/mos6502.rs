@@ -1,8 +1,8 @@
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
 use std::fmt::Debug;
-use std::rc::Rc;
 use std::fs::File;
+use std::rc::Rc;
 use std::{io, io::prelude::*};
 
 pub type Address = u16;
@@ -189,20 +189,6 @@ impl Cpu {
     fn interrupt_handles(&self) -> &InterruptHandling {
         &self.inter
     }
-
-    /// Given a result of an operation, try to set it as a result in
-    /// the current instruction if one is present. Return according
-    /// to the success of the update.
-    fn try_set_instruction_result(
-        &mut self,
-        result: AddressingOutput,
-    ) -> Result<AddressingOutput, CpuError> {
-        if let Some(i) = &mut self.current_instruction {
-            (*i).amode_output = result.clone();
-            return Ok(result);
-        }
-        Err(CpuError::BusInterfaceMissing)
-    }
 }
 
 impl std::fmt::Debug for Cpu {
@@ -212,6 +198,8 @@ impl std::fmt::Debug for Cpu {
 }
 
 impl Cpu {
+    /// **new()** - Creates a new instance of a cpu with its default
+    /// field values
     fn new() -> Self {
         Self {
             regset: RegisterSet::new(),
@@ -244,8 +232,26 @@ impl Cpu {
         }
     }
 
-    fn cycle(&mut self) {
-        // if !self.time.residual() {}
+    fn clock_cycle(&mut self) {
+        use m6502_addressing_modes::prepare_operands;
+
+        if self.time.residual() == 0 {
+            let opcode = self.fetch();
+
+            self.current_instruction = Some(Instruction::decode_by(opcode));
+            *self.time_mut().residual_mut() = self.current_instruction.as_ref().unwrap().time;
+            prepare_operands(self);
+
+            let address = self.current_instruction.as_ref().unwrap().amode;
+            if let Ok(amode_output) = address(self) {
+                self.current_instruction.as_mut().unwrap().amode_output = amode_output;
+            } else {
+                panic!("Failed addressing");
+            }
+
+            let execute = self.current_instruction.as_ref().unwrap().fun;
+            execute(self);
+        }
 
         self.time_mut().next();
     }
@@ -281,25 +287,29 @@ impl Cpu {
         regset.set_unused(true);
         self.regset = regset;
 
-        let timing = Timings {
+        self.time = Timings {
             residual: 8,
             elapsed: 0,
         };
-        self.time = timing;
     }
 
     /// **connect()** - Connects the cpu to a bus, providing a context
     /// for read and write operations.
     fn connect_to(&mut self, conn: Rc<RefCell<dyn CommunicationInterface>>) {
-        if self.bus_conn.is_some() {
-            return;
+        if let None = self.bus_conn {
+            self.bus_conn = Some(conn);
         }
-
-        self.bus_conn = Some(conn);
     }
 }
 
 impl Cpu {
+    ///
+    /// TODO FIXME:
+    /// Consider returning Option<> or Result<> in order to
+    /// give better return "code" to the called whether the
+    /// value was actually 0 or an error occured. Same
+    /// think goes for `writ_byte()` and the other wrapper
+    /// functions.
     ///
     /// **read_byte()** - Initiates a read request to the interface
     /// **if one is present**
@@ -340,6 +350,15 @@ impl Cpu {
         }
 
         vec![]
+    }
+
+    ///
+    /// **fetch()** - Reads a byte from addressing the interface
+    /// with the value of PC. After that the PC gets updated.
+    #[inline]
+    fn fetch(&mut self) -> Byte {
+        let pc = self.inc_pc();
+        self.read_byte(pc)
     }
 }
 
@@ -459,12 +478,12 @@ pub enum AddressingOutput {
 /// such as the operand used and its final result
 /// which might be a value (Fetched) or a address
 /// (Absolute Address).
-struct Instruction {
+pub struct Instruction {
     ///
     /// Meta information
     amode: AddressingModeFn,
     fun: InstructionFn,
-    time: u16,
+    time: u8,
     mnemonic: String,
     size: u16,
 
@@ -507,6 +526,9 @@ impl PartialEq for Instruction {
             && self.amode as usize == other.amode as usize
     }
 }
+
+type Operand = Option<Word>;
+pub type InstructionMeta = (Operand, AddressingOutput);
 
 impl Instruction {
     ///
@@ -699,6 +721,15 @@ impl Instruction {
             _ => make_illegal!(),
         };
     }
+
+    fn meta(&self) -> InstructionMeta {
+        (self.operand, self.amode_output)
+    }
+
+    fn set_meta(&mut self, meta: InstructionMeta) {
+        self.operand = meta.0;
+        self.amode_output = meta.1;
+    }
 }
 
 ///
@@ -772,21 +803,66 @@ mod m6502_intruction_set {
 ///
 ///
 mod m6502_addressing_modes {
-
-    ///  **TODO:**
-    ///  A function which calls `amode` and makes the necessary checks
-    ///  beforehand.
-    /// 
-    ///  if cpu.current_instruction.is_none() {
-    ///      return Err(CurrentInstructionMissing);
-    ///  }
-
-    use super::{Address, Byte, Word, Opcode};
+    
+    use super::{Address, Byte, Opcode, Word};
     use super::{AddressingOutput, AddressingOutput::*, CpuError, CpuError::*};
     use super::{Cpu, Instruction, MainBus};
 
     use std::cell::RefCell;
     use std::rc::Rc;
+
+
+    /// **prepare_operands()** - This is called right before
+    /// the addressing mode specifics are executed in order
+    /// to fetch the required operand into the operand
+    /// field in `i`.
+    /// 
+    /// FIXME FIXME FIXME -- I AM UGLY!
+    pub fn prepare_operands(cpu: &mut Cpu) {
+
+        if cpu.current_instruction.is_none() {
+            return;
+        }
+
+        /// TODO FIXME: This is incredibly ugly!!!
+        /// For some reason
+        /// "match ... { IMM | ZP0 | ZPX | ZPY => 1 }"
+        /// does not compile.
+        /// 
+        let IMP: usize = implied_am as usize;
+        let IMM: usize = immediate_am as usize;
+        let ZP0: usize = zeropage_am as usize;
+        let ZPX: usize = zeropage_x_am as usize;
+        let ZPY: usize = zeropage_y_am as usize;
+        let ABS: usize = absolute_am as usize;
+        let ABX: usize = absolute_x_am as usize;
+        let ABY: usize = absolute_y_am as usize;
+        let INY: usize = indirect_y_am as usize;
+        let INX: usize = indirect_x_am as usize;
+        let IND: usize = indirect_am as usize;
+        let REL: usize = relative_am as usize;
+
+        let am = cpu.current_instruction.as_ref().unwrap().amode as usize;
+
+        let num_fetched = if am == IMP { 0 }
+            else if vec![IMM, ZP0, ZPX, ZPY, INY, INX, REL].contains(&am) { 1 }
+            else if vec![ABS, ABX, ABY, IND].contains(&am) { 2 }
+            else { panic!("Unknown addressing mode")
+        };
+
+        let operand: Word = match num_fetched {
+            0 => 0xBEEF,
+            1 => Word::from(cpu.fetch()),
+            2 => {
+                let lo = cpu.fetch();
+                let hi = cpu.fetch();
+                Word::from_le_bytes([lo, hi])
+            },
+            _ => unreachable!("Unknown number of bytes for operand"),
+        };
+
+        cpu.current_instruction.as_mut().unwrap().operand = Some(operand);
+    }
 
     ///
     /// All addressing mode functions **require** that
@@ -796,7 +872,7 @@ mod m6502_addressing_modes {
     /// a `current_instruction`. A `panic!()` (or appropriate
     /// error return) will occur if **some** of these
     /// requirements are not met.
-    /// 
+    ///
     /// ---------------------
     ///
     /// **Implied**
@@ -810,7 +886,7 @@ mod m6502_addressing_modes {
     //  calling `implied_am`. The only difference between the
     //  two is that the accumulator AM is using the
     //  value of the accumulator as its operand, hence the name --
-    //  accumulator. That is why the contents of the 
+    //  accumulator. That is why the contents of the
     //  accumulator are set as this addressing mode's output.
     //
     pub fn implied_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
@@ -844,7 +920,7 @@ mod m6502_addressing_modes {
     /// for address value (6502 addresses are 16-bit).
     ///
     pub fn zeropage_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        match read_from_operand_with_offset(cpu, 0, true) {                
+        match read_from_operand_with_offset(cpu, 0, true) {
             Ok(value) => return Ok(Fetched(value)),
             Err(e) => return Err(e),
         }
@@ -859,7 +935,7 @@ mod m6502_addressing_modes {
     ///
     pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().x_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, true) {                
+        match read_from_operand_with_offset(cpu, offset, true) {
             Ok(value) => return Ok(Fetched(value)),
             Err(e) => return Err(e),
         }
@@ -873,7 +949,7 @@ mod m6502_addressing_modes {
     ///
     pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().y_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, true) {                
+        match read_from_operand_with_offset(cpu, offset, true) {
             Ok(value) => return Ok(Fetched(value)),
             Err(e) => return Err(e),
         };
@@ -884,12 +960,16 @@ mod m6502_addressing_modes {
     /// the x-index and y-index offset ones).
     /// Interpret the given operand as an adress
     /// and read from it a single byte value.
-    fn read_from_operand_with_offset(cpu: &mut Cpu, offset: Address, zeropage: bool) -> Result<Byte, CpuError> {
+    fn read_from_operand_with_offset(
+        cpu: &mut Cpu,
+        offset: Address,
+        zeropage: bool,
+    ) -> Result<Byte, CpuError> {
         let i = cpu.current_instruction.as_ref().unwrap();
-        if let Some(mut operand) = i.operand {                
+        if let Some(mut operand) = i.operand {
             operand += offset;
-            if zeropage { 
-                operand &= 0x00FF; 
+            if zeropage {
+                operand &= 0x00FF;
             } else {
                 if operand & 0xFF00 != (operand - offset) & 0xFF00 {
                     mark_extra_clockcycle(cpu);
@@ -978,7 +1058,6 @@ mod m6502_addressing_modes {
     pub fn indirect_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let i = cpu.current_instruction.as_ref().unwrap();
         if let Some(ptr) = i.operand {
-
             // Simulate hardware bug
             let page_crossed = (ptr & 0x00FF) == 0x00FF;
             let address_of_next_hi = if page_crossed { ptr & 0xFF00 } else { ptr + 1 };
@@ -1018,7 +1097,6 @@ mod m6502_addressing_modes {
         }
 
         Err(ExpectedOperandMissing)
-
     }
 
     pub fn indirect_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
@@ -1041,7 +1119,6 @@ mod m6502_addressing_modes {
         }
 
         Err(ExpectedOperandMissing)
-        
     }
 
     fn mark_extra_clockcycle(cpu: &mut Cpu) {
@@ -1266,6 +1343,47 @@ mod m6502_addressing_modes {
             assert_eq!(result.ok(), Some(Fetched(0x37)));
             assert_eq!(marked_extra_cycle, false);
         }
+
+        #[test]
+        fn test__prepare_operands_zero() {
+            let mut cpu = setup(0x0000, true, 0x00, None);
+            cpu.current_instruction = Some(Instruction::decode_by(0x08));
+
+            prepare_operands(&mut cpu);
+
+            let i = cpu.current_instruction.unwrap();
+            assert_eq!(i.operand.is_some(), true);
+            assert_eq!(i.operand.unwrap(), 0xBEEF);
+        }
+
+        #[test]
+        fn test__prepare_operands_one() {
+            let mut cpu = setup(0x001, true, 0x00, None);
+            cpu.current_instruction = Some(Instruction::decode_by(0xA9));
+            cpu.writ_byte(0x0001, 0x10);
+
+            prepare_operands(&mut cpu);
+
+            assert_eq!(cpu.pc(), 0x02);
+            let i = cpu.current_instruction.unwrap();
+            assert_eq!(i.operand.is_some(), true);
+            assert_eq!(i.operand.unwrap(), 0x10);
+        }
+
+        #[test]
+        fn test__prepare_operands_two() {
+            let mut cpu = setup(0x001, true, 0x00, None);
+            cpu.current_instruction = Some(Instruction::decode_by(0xAD));
+            cpu.writ_byte(0x0001, 0x10);
+            cpu.writ_byte(0x0002, 0x11);
+
+            prepare_operands(&mut cpu);
+
+            assert_eq!(cpu.pc(), 0x03);
+            let i = cpu.current_instruction.unwrap();
+            assert_eq!(i.operand.is_some(), true);
+            assert_eq!(i.operand.unwrap(), 0x1110);
+        }
     }
 }
 
@@ -1327,7 +1445,13 @@ impl Cpu {
 
     /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
     /// starting from `begin` in memory.
-    fn load_program(&mut self, program: &Vec<Byte>, begin: Address, limit: u16, start_it: bool) -> Result<Address, CpuError> {
+    fn load_program(
+        &mut self,
+        program: &Vec<Byte>,
+        begin: Address,
+        limit: u16,
+        start_it: bool,
+    ) -> Result<Address, CpuError> {
         if self.bus_conn.is_none() {
             return Err(CpuError::BusInterfaceMissing);
         }
@@ -1355,7 +1479,6 @@ impl Cpu {
         begin: Address,
         start_it: bool,
     ) -> Result<Address, CpuError> {
-
         use std::env::current_dir;
 
         let path = current_dir().unwrap().display();
@@ -1549,15 +1672,28 @@ mod test {
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         
         let expected_asm = vec![
-            Instruction::decode_by(0xA9),
-            Instruction::decode_by(0x85),
-            Instruction::decode_by(0xA9),
+            Instruction::decode_by(0xA9), // lda #$02
+            Instruction::decode_by(0x85), // eor  $02
+            Instruction::decode_by(0xA9), // lda #$04
         ];
 
         let old_pc = cpu.load_file("src/test.bin", 0x8000, true);
 
         let asm = cpu.disassemble(0x8000, 6);
         assert_eq!(old_pc, Ok(0x0000));
-        assert_eq!(asm.ok(), Some(expected_asm)); 
+        assert_eq!(asm.ok(), Some(expected_asm));
+    }
+
+    #[test]
+    fn test__single_clock_cycle() {
+        let mut cpu = Cpu::new_custompc(0x0000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+
+        let wrapped_old_pc = cpu.load_file("src/test.bin", 0x8000, true);
+        cpu.clock_cycle();
+
+        assert_eq!(cpu.current_instruction.as_ref().unwrap().amode_output, AddressingOutput::Fetched(0x02));
+        assert_eq!(cpu.pc(), 0x8002);
+        assert_eq!(wrapped_old_pc.ok(), Some(0x0000));
     }
 }
