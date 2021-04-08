@@ -1,6 +1,6 @@
-use std::fmt::Debug;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
+use std::fmt::Debug;
 use std::rc::Rc;
 
 pub type Address = u16;
@@ -8,7 +8,7 @@ pub type Word = u16;
 pub type Opcode = u8;
 pub type Byte = u8;
 
-pub type AddressingModeFn = fn(&mut Cpu)-> Result<InstructionResult, CpuError> ;
+pub type AddressingModeFn = fn(&mut Cpu) -> Result<AddressingOutput, CpuError>;
 pub type InstructionFn = fn(&mut Cpu);
 
 /// This structure represents the registers each MOS 6502 has.
@@ -164,10 +164,11 @@ pub struct Cpu {
 
 pub enum CpuError {
     BusInterfaceMissing,
+    CurrentInstructionMissing,
+    ExpectedOperandMissing
 }
 
 impl Cpu {
-
     /// Acts as post-fix increment operation (pc++):
     /// Increments the Program Counter and returns the **old** value.
     #[inline]
@@ -175,7 +176,7 @@ impl Cpu {
         let old_pc = self.regset.prog_counter;
         self.regset.prog_counter += 1;
         old_pc
-    } 
+    }
 
     fn pc(&self) -> Word {
         self.regset.prog_counter
@@ -188,9 +189,12 @@ impl Cpu {
     /// Given a result of an operation, try to set it as a result in
     /// the current instruction if one is present. Return according
     /// to the success of the update.
-    fn try_set_instruction_result(&mut self, result: InstructionResult) -> Result<InstructionResult, CpuError> {
+    fn try_set_instruction_result(
+        &mut self,
+        result: AddressingOutput,
+    ) -> Result<AddressingOutput, CpuError> {
         if let Some(i) = &mut self.current_instruction {
-            (*i).result = result.clone();
+            (*i).amode_output = result.clone();
             return Ok(result);
         }
         Err(CpuError::BusInterfaceMissing)
@@ -292,8 +296,7 @@ impl Cpu {
 }
 
 impl Cpu {
-
-    /// 
+    ///
     /// **read_byte()** - Initiates a read request to the interface
     /// **if one is present**
     fn read_byte(&self, address: Address) -> Byte {
@@ -305,7 +308,7 @@ impl Cpu {
         0
     }
 
-    /// 
+    ///
     /// **writ_byte()** - Initiates a write request to the interface
     /// **if one is present**
     fn writ_byte(&self, address: Address, data: Byte) {
@@ -314,7 +317,7 @@ impl Cpu {
         }
     }
 
-    /// 
+    ///
     /// **read_word()** - Wrapper function for reading two sequential
     /// bytes from the interface **if one is present**.
     fn read_word(&self, address: Address) -> Word {
@@ -323,7 +326,7 @@ impl Cpu {
         Word::from_le_bytes([lo, hi])
     }
 
-    /// 
+    ///
     /// **read_some()** - Reads sequence of bytes from the interface
     fn read_some(&self, address: Address, len: u16) -> Vec<Byte> {
         if let Some(bus) = &self.bus_conn {
@@ -418,8 +421,8 @@ macro_rules! make_instr {
             time: $p_time,
             mnemonic: String::from($p_mnemonic),
             size: $p_size,
-            result: InstructionResult::NotExecuted,
-            operand: None
+            amode_output: AddressingOutput::NotExecuted,
+            operand: None,
         }
     };
 }
@@ -435,7 +438,7 @@ macro_rules! make_illegal {
 }
 
 #[derive(Copy, Clone, Debug, PartialEq)]
-pub enum InstructionResult {
+pub enum AddressingOutput {
     Fetched(Byte),
     AbsoluteAddress(Word),
     NotExecuted,
@@ -443,7 +446,7 @@ pub enum InstructionResult {
 
 ///
 /// Instruction
-/// 
+///
 /// This structure represents a single operatation in
 /// the 6502 cpu. It contains meta information about
 /// the instruction such as its addressing mode and
@@ -453,8 +456,7 @@ pub enum InstructionResult {
 /// which might be a value (Fetched) or a address
 /// (Absolute Address).
 struct Instruction {
-
-    /// 
+    ///
     /// Meta information
     amode: AddressingModeFn,
     fun: InstructionFn,
@@ -463,16 +465,23 @@ struct Instruction {
     size: u16,
 
     /// Instruction context
-    /// 
+    ///
     /// **operand** contains the value of the
     /// operands this instruction is using. They
-    /// might be either zero or one element.
-    /// 
-    /// **result** contains the "output" of the
-    /// this instruction. It might be either an
-    /// address or a value fetched from memory.
+    /// might be either zero or one element.\
+    /// \
+    /// It is modified **before** the function
+    /// `amode` and used in it in order to produce
+    /// `amode_output`.
     operand: Option<Word>,
-    result: InstructionResult,
+
+    /// **amode_output** - The "output" of
+    /// the process of addressing this instruction.
+    /// It might be either an address or a value
+    /// fetched from memory. \
+    /// \
+    /// It is modified **only from the function `amode`.
+    amode_output: AddressingOutput,
 }
 
 impl Debug for Instruction {
@@ -487,11 +496,11 @@ impl Debug for Instruction {
 
 impl PartialEq for Instruction {
     fn eq(&self, other: &Self) -> bool {
-        self.time == other.time &&
-        self.mnemonic == other.mnemonic &&
-        self.size == other.size &&
-        self.fun as usize == other.fun as usize &&
-        self.amode as usize == other.amode as usize
+        self.time == other.time
+            && self.mnemonic == other.mnemonic
+            && self.size == other.size
+            && self.fun as usize == other.fun as usize
+            && self.amode as usize == other.amode as usize
     }
 }
 
@@ -760,37 +769,66 @@ mod m6502_intruction_set {
 ///
 mod m6502_addressing_modes {
 
-    use super::{Address, Byte, Word};
-    use super::{InstructionResult, InstructionResult::*, CpuError};
+    ///  **TODO:**
+    ///  A function which calls `amode` and makes the necessary checks
+    ///  beforehand.
+    /// 
+    ///  if cpu.current_instruction.is_none() {
+    ///      return Err(CurrentInstructionMissing);
+    ///  }
+
+    use super::{Address, Byte, Word, Opcode};
+    use super::{AddressingOutput, AddressingOutput::*, CpuError, CpuError::*};
     use super::{Cpu, Instruction, MainBus};
 
     use std::cell::RefCell;
     use std::rc::Rc;
 
     ///
+    /// All addressing mode functions **require** that
+    /// the cpu has loaded a value for `current_instruction`
+    /// and its concrete operands. Each of them will check
+    /// for the operands they expect, but that there is
+    /// a `current_instruction`. A `panic!()` (or appropriate
+    /// error return) will occur if **some** of these
+    /// requirements are not met.
+    /// 
+    /// ---------------------
+    ///
     /// **Implied**
     /// This addressing mode is the simplest one, because it is
     /// use only with instructions which do not need any additional
     /// context -- it is _implied_.
-    ///
-    pub fn implied_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
+    //
+    //  No operands here. This addressing mode does not use any
+    //  additional values. In this current implementation
+    //  the accumulator addressing mode is "simulated" by
+    //  calling `implied_am`. The only difference between the
+    //  two is that the accumulator AM is using the
+    //  value of the accumulator as its operand, hence the name --
+    //  accumulator. That is why the contents of the 
+    //  accumulator are set as this addressing mode's output.
+    //
+    pub fn implied_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let accumulator = cpu.regset().accumulator();
         let fetched = Fetched(accumulator);
 
-        cpu.try_set_instruction_result(fetched)
+        Ok(fetched)
     }
 
     ///
     /// **Immediate**
-    /// This addressing mode is used when the next byte to be
-    /// used a value.
+    /// This addressing mode is used when the next byte
+    /// is directly used as a value.
     ///
-    pub fn immediate_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let next_address = cpu.regset().prog_counter() + 1;
-        let value = cpu.read_byte(next_address);
-        cpu.inc_pc();
-
-        cpu.try_set_instruction_result(Fetched(value))
+    pub fn immediate_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
+        if let Some(operand) = i.operand {
+            let fetched = Fetched(operand as u8);
+            Ok(fetched)
+        } else {
+            Err(ExpectedOperandMissing)
+        }
     }
 
     ///
@@ -801,11 +839,11 @@ mod m6502_addressing_modes {
     /// memory _faster_ by providing a 8-bit number instead of 16-bit
     /// for address value (6502 addresses are 16-bit).
     ///
-    pub fn zeropage_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let next_address = Address::from(zeropage_next_address(cpu));
-        let value = cpu.read_byte(next_address);
-
-        cpu.try_set_instruction_result(Fetched(value))
+    pub fn zeropage_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        match read_from_operand_with_offset(cpu, 0, true) {                
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
+        }
     }
 
     ///
@@ -815,12 +853,12 @@ mod m6502_addressing_modes {
     /// the X-index register. If the address is bigger than
     /// the maximum of zero page, it wrapps around.
     ///
-    pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let offset = cpu.regset().x_index() as Byte;
-        let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
-        let value = cpu.read_byte(next_address);
-
-        cpu.try_set_instruction_result(Fetched(value))
+    pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let offset = cpu.regset().x_index() as Address;
+        match read_from_operand_with_offset(cpu, offset, true) {                
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
+        }
     }
 
     ///
@@ -829,19 +867,33 @@ mod m6502_addressing_modes {
     /// Same as Zero page with X offset but using the value
     /// inside the Y-index register instead of the X-index.
     ///
-    pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let offset = cpu.regset().y_index() as Byte;
-        let next_address = Address::from(zeropage_next_address(cpu).wrapping_add(offset));
-        let value = cpu.read_byte(next_address);
-
-        cpu.try_set_instruction_result(Fetched(value))
+    pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let offset = cpu.regset().y_index() as Address;
+        match read_from_operand_with_offset(cpu, offset, true) {                
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
+        };
     }
 
-    /// A helper function, used with the zeropage
-    /// addressing modes
-    fn zeropage_next_address(cpu: &mut Cpu) -> Byte {
-        let pc = cpu.inc_pc();
-        cpu.read_byte(pc)
+    /// Helper routine used from zero-page and
+    /// absolute addressing modes (includeing
+    /// the x-index and y-index offset ones).
+    /// Interpret the given operand as an adress
+    /// and read from it a single byte value.
+    fn read_from_operand_with_offset(cpu: &mut Cpu, offset: Address, zeropage: bool) -> Result<Byte, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
+        if let Some(mut operand) = i.operand {                
+            operand += offset;
+            if zeropage { 
+                operand &= 0x00FF; 
+            } else {
+                if operand & 0xFF00 != (operand - offset) & 0xFF00 {
+                    mark_extra_clockcycle(cpu);
+                }
+            }
+            return Ok(cpu.read_byte(operand));
+        }
+        Err(ExpectedOperandMissing)
     }
 
     ///
@@ -851,11 +903,11 @@ mod m6502_addressing_modes {
     /// is going to be used, the full 16-bit address has to be
     /// acquired and then read from.
     ///
-    pub fn absolute_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let next_address = absolute_next_address(cpu);
-        let value = cpu.read_byte(next_address);
-        
-        cpu.try_set_instruction_result(Fetched(value))
+    pub fn absolute_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        match read_from_operand_with_offset(cpu, 0, false) {
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
+        }
     }
 
     ///
@@ -864,17 +916,12 @@ mod m6502_addressing_modes {
     /// Analogical to the absolute addressing mode but
     /// uses the value of the X-index register as an offset
     /// before actually reading the value.
-    pub fn absolute_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let x_index = cpu.regset().x_index();
-        let next_address = absolute_next_address(cpu);
-        let offset_address = next_address + Address::from(x_index);
-        let value = cpu.read_byte(next_address);
-
-        if next_address & 0xFF00 != offset_address & 0xFF00 {
-            mark_extra_clockcycle(cpu);
+    pub fn absolute_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let offset = cpu.regset().x_index() as Address;
+        match read_from_operand_with_offset(cpu, offset, false) {
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
         }
-
-        cpu.try_set_instruction_result(Fetched(value))
     }
 
     ///
@@ -885,28 +932,12 @@ mod m6502_addressing_modes {
     ///
     /// FIXME: Consider extracting common logic with `absolute_x_am`
     /// into a helping routine.
-    pub fn absolute_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let y_index = cpu.regset().y_index();
-        let next_address = absolute_next_address(cpu);
-        let offset_address = next_address + Address::from(y_index);
-        let value = cpu.read_byte(offset_address);
-
-        if next_address & 0xFF00 != offset_address & 0xFF00 {
-            mark_extra_clockcycle(cpu);
+    pub fn absolute_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let offset = cpu.regset().y_index() as Address;
+        match read_from_operand_with_offset(cpu, offset, false) {
+            Ok(value) => return Ok(Fetched(value)),
+            Err(e) => return Err(e),
         }
-
-        cpu.try_set_instruction_result(Fetched(value))
-    }
-
-    /// A helper function, used with the absolute
-    /// addressing modes
-    fn absolute_next_address(cpu: &mut Cpu) -> Address {
-        let pc = cpu.inc_pc();
-        let lo = cpu.read_byte(pc);
-        let pc = cpu.inc_pc();
-        let hi = cpu.read_byte(pc);
-        let next_address = Address::from_le_bytes([lo, hi]);
-        next_address
     }
 
     ///
@@ -915,13 +946,15 @@ mod m6502_addressing_modes {
     /// The supplied byte is interpreted as a _signed offset_
     /// This offset is then added to the program counter.
     ///
-    pub fn relative_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let mut pc = cpu.pc();
-        let offset = cpu.read_byte(pc);
-        pc = pc.wrapping_add(signedbyte_to_word(offset));
+    pub fn relative_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
+        if let Some(operand) = i.operand {
+            let operand_u8 = operand as u8;
+            let value = cpu.pc().wrapping_add(signedbyte_to_word(operand_u8));
+            return Ok(AbsoluteAddress(value));
+        }
 
-        cpu.try_set_instruction_result(AbsoluteAddress(pc))
-
+        Err(ExpectedOperandMissing)
     }
 
     fn signedbyte_to_word(p_num: Byte) -> Word {
@@ -938,22 +971,22 @@ mod m6502_addressing_modes {
     /// **NB:**\
     /// This operation has a hardware bug when
     /// a page boundary is crossed.
-    pub fn indirect_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let pc = cpu.inc_pc();
-        let ptr_lo = cpu.read_byte(pc);
-        let pc = cpu.inc_pc();
-        let ptr_hi = cpu.read_byte(pc);
-        let ptr = Address::from_le_bytes([ptr_lo, ptr_hi]);
+    pub fn indirect_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
+        if let Some(ptr) = i.operand {
 
-        // Simulate hardware bug
-        let page_crossed = ptr_lo == 0x00FF;
-        let address_of_next_hi = if page_crossed { ptr & 0xFF00 } else { ptr + 1 };
+            // Simulate hardware bug
+            let page_crossed = (ptr & 0x00FF) == 0x00FF;
+            let address_of_next_hi = if page_crossed { ptr & 0xFF00 } else { ptr + 1 };
 
-        let next_address_lo = cpu.read_byte(ptr);
-        let next_address_hi = cpu.read_byte(address_of_next_hi);
+            let next_address_lo = cpu.read_byte(ptr);
+            let next_address_hi = cpu.read_byte(address_of_next_hi);
+            let next_address = Address::from_le_bytes([next_address_lo, next_address_hi]);
 
-        let next_address = Address::from_le_bytes([next_address_lo, next_address_hi]);
-        cpu.try_set_instruction_result(AbsoluteAddress(next_address))
+            return Ok(AbsoluteAddress(next_address));
+        }
+
+        Err(ExpectedOperandMissing)
     }
 
     ///
@@ -963,37 +996,48 @@ mod m6502_addressing_modes {
     /// by the value of the X-index register to a
     /// location in the zero page. Then the actual
     /// address is read.
-    pub fn indirect_x_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let pc = cpu.inc_pc();
-        let base = cpu.read_byte(pc);
-        let x_index = cpu.regset().x_index();
-        let offset = Address::from(base.wrapping_add(x_index));
+    pub fn indirect_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
 
-        let lo = cpu.read_byte(offset);
-        let hi = cpu.read_byte(offset + 1 & 0x00FF);
+        if let Some(base_u16) = i.operand {
+            let base = base_u16 as Byte;
+            let x_index = cpu.regset().x_index();
+            let offset = Address::from(base.wrapping_add(x_index));
 
-        let next_address = Address::from_le_bytes([lo, hi]);
-        let value = cpu.read_byte(next_address);
-        cpu.try_set_instruction_result(Fetched(value))
-    }
+            let lo = cpu.read_byte(offset);
+            let hi = cpu.read_byte((offset + 1) & 0x00FF);
 
-    pub fn indirect_y_am(cpu: &mut Cpu) -> Result<InstructionResult, CpuError> {
-        let pc = cpu.inc_pc();
-        let base = Address::from(cpu.read_byte(pc));
+            let next_address = Address::from_le_bytes([lo, hi]);
+            let value = cpu.read_byte(next_address);
 
-        let lo = cpu.read_byte(base);
-        let hi = cpu.read_byte(base + 1 & 0x00FF);
-        let next_address = Address::from_le_bytes([lo, hi]);
-
-        let y_index = cpu.regset().y_index();
-        let offset_address = next_address.wrapping_add(y_index as Address);
-
-        if next_address & 0xFF00 != offset_address & 0xFF00 {
-            mark_extra_clockcycle(cpu);
+            return Ok(Fetched(value));
         }
 
-        let value = cpu.read_byte(offset_address);
-        cpu.try_set_instruction_result(Fetched(value))
+        Err(ExpectedOperandMissing)
+
+    }
+
+    pub fn indirect_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
+        let i = cpu.current_instruction.as_ref().unwrap();
+
+        if let Some(base_u16) = i.operand {
+            let lo = cpu.read_byte(base_u16);
+            let hi = cpu.read_byte((base_u16 + 1) & 0x00FF);
+            let next_address = Address::from_le_bytes([lo, hi]);
+
+            let y_index = cpu.regset().y_index();
+            let offset_address = next_address.wrapping_add(y_index as Address);
+
+            if next_address & 0xFF00 != offset_address & 0xFF00 {
+                mark_extra_clockcycle(cpu);
+            }
+
+            let value = cpu.read_byte(offset_address);
+            return Ok(Fetched(value));
+        }
+
+        Err(ExpectedOperandMissing)
+        
     }
 
     fn mark_extra_clockcycle(cpu: &mut Cpu) {
@@ -1005,16 +1049,11 @@ mod m6502_addressing_modes {
         use super::*;
 
         /// A setup() routine for all tests.
-        /// Each one of them requires a customely specified PC
-        /// and each on of them sets a "random" current instructrion
-        fn setup(custom_pc: Word, connect: bool) -> Cpu {
+        fn setup(custom_pc: Word, connect: bool, opcode: Opcode, operand: Option<Word>) -> Cpu {
             let mut cpu = Cpu::new_custompc(custom_pc);
 
-            // Set a random instruction as current, because it 
-            // doesn't matter which but only that there is one.
-            if cpu.current_instruction.is_none() {
-                cpu.current_instruction = Some(Instruction::decode_by(0x08));
-            }
+            cpu.current_instruction = Some(Instruction::decode_by(opcode));
+            cpu.current_instruction.as_mut().unwrap().operand = operand;
 
             if connect {
                 cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
@@ -1025,7 +1064,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__implied_am() {
-            let mut cpu = setup(0x0000, false);
+            let mut cpu = setup(0x0000, false, 0x08, None);
             cpu.regset_mut().set_accumulator(0x1A);
 
             let result = implied_am(&mut cpu);
@@ -1036,19 +1075,18 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__immediate_am() {
-            let mut cpu = setup(0x00FA - 1, true);
+            let mut cpu = setup(0x0000, true, 0xA9, Some(0x10));
             cpu.writ_byte(0xFA, 0x10);
 
             let result = immediate_am(&mut cpu);
 
             assert_eq!(result.ok(), Some(Fetched(0x10)));
-            assert_eq!(cpu.pc(), 0x00FA);
+            assert_eq!(cpu.pc(), 0x0000);
         }
 
         #[test]
         fn test__zeropage_am() {
-            let mut cpu = setup(0x0000, true);
-            cpu.writ_byte(0x00, 0x35);
+            let mut cpu = setup(0x0000, true, 0x25, Some(0x35));
             cpu.writ_byte(0x35, 0x10);
 
             let result = zeropage_am(&mut cpu);
@@ -1058,9 +1096,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__zeropage_x_offset_am() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x35, Some(0x35));
             *cpu.regset_mut().x_index_mut() = 3;
-            cpu.writ_byte(0x00, 0x35);
             cpu.writ_byte(0x35 + 3, 0x10);
 
             let result = zeropage_x_am(&mut cpu);
@@ -1070,9 +1107,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__zeropage_offset_wrapping_am() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x35, Some(0x35));
             *cpu.regset_mut().y_index_mut() = 0xff;
-            cpu.writ_byte(0x00, 0x35);
             cpu.writ_byte(0x35 - 1, 0x10);
 
             let result = zeropage_y_am(&mut cpu);
@@ -1082,10 +1118,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__absolute_am() {
-            let mut cpu = setup(0x00, true);
-
-            cpu.writ_byte(0x00, 0x10);
-            cpu.writ_byte(0x01, 0x02);
+            let mut cpu = setup(0x00, true, 0x2D, Some(0x0210));
             cpu.writ_byte(0x0210, 0x10);
 
             let result = absolute_am(&mut cpu);
@@ -1095,11 +1128,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__absolute_offset_am() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x3D, Some(0x0210));
             *cpu.regset_mut().y_index_mut() = 0xA;
-
-            cpu.writ_byte(0x00, 0x10);
-            cpu.writ_byte(0x01, 0x02);
             cpu.writ_byte(0x0210 + 0xA, 0x10);
 
             let result = absolute_y_am(&mut cpu);
@@ -1109,9 +1139,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__relative_am_w_positive_number() {
-            let mut cpu = setup(0x00, true);
-
-            cpu.writ_byte(0x00, 0x10);
+            let mut cpu = setup(0x00, true, 0x30, Some(0x10));
             cpu.writ_byte(0x10, 0x10);
 
             let result = relative_am(&mut cpu);
@@ -1121,8 +1149,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__relative_am_w_negative_number() {
-            let mut cpu = setup(0x90, true);
-            cpu.writ_byte(0x90, 0x80);
+            let mut cpu = setup(0x90, true, 0x30, Some(0x80));
             cpu.writ_byte(0x10, 0x10);
 
             let result = relative_am(&mut cpu);
@@ -1132,9 +1159,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_am_page_cross() {
-            let mut cpu = setup(0x00, true);
-            cpu.writ_byte(0x00, 0x11);
-            cpu.writ_byte(0x01, 0x10);
+            let mut cpu = setup(0x00, true, 0x6C, Some(0x1011));
             cpu.writ_byte(0x1011, 0x01);
             cpu.writ_byte(0x1012, 0xFF);
 
@@ -1145,9 +1170,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_am() {
-            let mut cpu = setup(0x00, true);
-            cpu.writ_byte(0x00, 0xFF);
-            cpu.writ_byte(0x01, 0x10);
+            let mut cpu = setup(0x00, true, 0x6C, Some(0x10FF));
             cpu.writ_byte(0x10FF, 0x01);
             cpu.writ_byte(0x1000, 0xA7);
 
@@ -1158,9 +1181,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_xoffset_am_1() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x21, Some(0x20));
             *cpu.regset_mut().x_index_mut() = 0x04;
-            cpu.writ_byte(0x00, 0x20);
             cpu.writ_byte(0x24, 0x74);
             cpu.writ_byte(0x25, 0x20);
             cpu.writ_byte(0x2074, 0x10);
@@ -1172,9 +1194,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_xoffset_am_2() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x21, Some(0x25));
             *cpu.regset_mut().x_index_mut() = 0x10;
-            cpu.writ_byte(0x00, 0x25);
             cpu.writ_byte(0x35, 0x01);
             cpu.writ_byte(0x36, 0xA7);
             cpu.writ_byte(0xA701, 0x19);
@@ -1186,7 +1207,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_xoffset_am_3() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x21, Some(0xFE));
             *cpu.regset_mut().x_index_mut() = 0x01;
             cpu.writ_byte(0x0000, 0xFE);
             cpu.writ_byte(0x00FF, 0x01);
@@ -1199,9 +1220,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_yoffset_am_1() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x31, Some(0x25));
             *cpu.regset_mut().y_index_mut() = 0x10;
-            cpu.writ_byte(0x0000, 0x25);
             cpu.writ_byte(0x0025, 0xFF);
             cpu.writ_byte(0x0026, 0xA7);
             cpu.writ_byte(0xA80F, 0x34);
@@ -1215,9 +1235,8 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_yoffset_am_2() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x31, Some(0x25));
             *cpu.regset_mut().y_index_mut() = 0x10;
-            cpu.writ_byte(0x0000, 0x25);
             cpu.writ_byte(0x0025, 0x01);
             cpu.writ_byte(0x0026, 0xA7);
             cpu.writ_byte(0xA711, 0x34);
@@ -1231,15 +1250,14 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__indirect_yoffset_am_3() {
-            let mut cpu = setup(0x00, true);
+            let mut cpu = setup(0x00, true, 0x31, Some(0x86));
             *cpu.regset_mut().y_index_mut() = 0x10;
-            cpu.writ_byte(0x0000, 0x86);
             cpu.writ_byte(0x0086, 0x28);
             cpu.writ_byte(0x0087, 0x40);
             cpu.writ_byte(0x4038, 0x37);
 
             let result = indirect_y_am(&mut cpu);
-            let marked_extra_cycle= cpu.time.residual == 1;
+            let marked_extra_cycle = cpu.time.residual == 1;
 
             assert_eq!(result.ok(), Some(Fetched(0x37)));
             assert_eq!(marked_extra_cycle, false);
@@ -1498,9 +1516,13 @@ mod test {
     fn test__load_program_and_disassemble() {
         let mut cpu = Cpu::new_custompc(0x8000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-        let prog: Vec<Byte> = vec![ 162, 10, 142, 0, 0, 162, 3 ];
+        let prog: Vec<Byte> = vec![162, 10, 142, 0, 0, 162, 3];
         cpu.load_program(&prog, 0x8000, 7);
-        let expected_asm = vec![ Instruction::decode_by(162), Instruction::decode_by(142), Instruction::decode_by(162) ];
+        let expected_asm = vec![
+            Instruction::decode_by(162),
+            Instruction::decode_by(142),
+            Instruction::decode_by(162),
+        ];
 
         let asm = cpu.disassemble(0x8000, 7);
 
