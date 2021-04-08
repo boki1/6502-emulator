@@ -4,6 +4,9 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::rc::Rc;
 use std::{io, io::prelude::*};
+use crate::mos6502::m6502_intruction_set::sta;
+use std::ops::Add;
+use crate::mos6502::InterruptKind::Irq;
 
 pub type Address = u16;
 pub type Word = u16;
@@ -36,14 +39,17 @@ pub type InstructionFn = fn(&mut Cpu);
 ///
 /// Example:
 /// ```
-/// #[inline]
-/// fn carry(&self) -> bool {
-///     (self.status & 1 << 7)) != 0;
-/// }
 ///
-/// #[inline]
-/// fn set_carry(&self, value: bool) -> bool {
-///     self.status = (self.status & !(1 << 7)) | ((value as u8) << 7);
+/// impl RegisterSet {
+///     #[inline]
+///     fn carry(&self) -> bool {
+///         (self.status & (1 << 7)) > 0
+///     }
+///
+///     #[inline]
+///     fn set_carry(&self, value: bool) {
+///         self.status = (self.status & !(1 << 7)) | ((value as u8) << 7);
+///     }
 /// }
 /// ```
 
@@ -141,27 +147,70 @@ pub struct InterruptHandling {
     pending_irq: bool,
 }
 
+#[derive(Debug, Copy, Clone, PartialEq)]
+pub enum InterruptKind {
+    Nmi,
+    Irq
+}
+
 /// **Jump vectors**
 /// In any of this exception cases - NMI, IRQ, BRK or a RESET, the PC should jump to the
 /// concrete address, also called _vector_.
 const NMI_VECTOR: Address = 0xfffa;
 const RESET_VECTOR: Address = 0xfffc;
-const IRQ_BRK_VECTOR: Address = 0xfffe;
+const IRQ_VECTOR: Address = 0xfffe;
+
+
+///
+/// Cpu
+///
+/// The struct representation of the MOS 6502.
+///
 
 #[derive(Getters, CopyGetters, Setters, MutGetters)]
 pub struct Cpu {
+
+    /// **regset**
+    /// The set of register that the cpu has
     #[getset(get_copy = "pub", get_mut = "pub")]
     regset: RegisterSet,
 
+    /// **time**
+    /// Information about the "timings" of
+    /// this cpu instance. Stores information
+    /// about the total elapsed clock cycles and
+    /// also about the cycles remaining of the
+    /// current instruction which is executing.
     #[getset(get_copy = "pub", get_mut = "pub")]
     time: Timings,
 
+    /// **inter**
+    /// Information about handling any interrupt
+    /// "requests" which are pending to cpu
+    /// instance.
     inter: InterruptHandling,
 
+    /// **bus_conn**
+    /// This cpu's connection to the "outer world".
+    /// This field stores a mutable reference to a
+    /// struct which has the trait CommunicationInterface,
+    /// a.k.a can be read from and written to. This
+    /// interface is stored as optional "shared pointer"
+    /// using the interior mutability pattern.
     bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>,
 
+    /// **i**
+    /// This field stores the current instruction which
+    /// is being executed. It should be stored directly
+    /// from the `cycle_clock()` function and not
+    /// modified until `self.time.residual` is not
+    /// decremented to 0. This is "residual time" is
+    /// used in order to emulate clock cycle accuracy.
+    /// Note the part with "emulate" and not "achieve".
+    /// The current implementation is not clock cycle
+    /// accurate.
     #[getset(get_mut = "pub")]
-    current_instruction: Option<Instruction>,
+    i: Option<Instruction>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -178,7 +227,7 @@ impl Cpu {
     #[inline]
     fn inc_pc(&mut self) -> Word {
         let old_pc = self.regset.prog_counter;
-        self.regset.prog_counter += 1;
+        self.regset.prog_counter = old_pc.wrapping_add(1);
         old_pc
     }
 
@@ -193,7 +242,13 @@ impl Cpu {
 
 impl std::fmt::Debug for Cpu {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        todo!()
+        f.debug_struct("Cpu")
+            .field("regset", &self.regset)
+            .field("time", &self.time)
+            .field("inter", &self.inter)
+            .field("is_attached", &self.bus_conn.is_some())
+            .field("curr_i", &self.i)
+            .finish()
     }
 }
 
@@ -212,7 +267,7 @@ impl Cpu {
                 pending_nmi: false,
             },
             bus_conn: None,
-            current_instruction: None,
+            i: None,
         }
     }
 
@@ -232,24 +287,32 @@ impl Cpu {
         }
     }
 
+    ///
+    /// **clock_cycle()** - Perform a single cpu cycle
+    ///
+    /// This implementation is not cycle correct, but
+    /// successfully emulates being so. This is done
+    /// by keeping the amount of cycles which have to
+    /// skipped/wasted after each actual instruction
+    /// execution.
     fn clock_cycle(&mut self) {
         use m6502_addressing_modes::prepare_operands;
 
         if self.time.residual() == 0 {
             let opcode = self.fetch();
 
-            self.current_instruction = Some(Instruction::decode_by(opcode));
-            *self.time_mut().residual_mut() = self.current_instruction.as_ref().unwrap().time;
+            self.i = Some(Instruction::decode_by(opcode));
+            *self.time_mut().residual_mut() = self.i.as_ref().unwrap().time;
             prepare_operands(self);
 
-            let address = self.current_instruction.as_ref().unwrap().amode;
+            let address = self.i.as_ref().unwrap().amode;
             if let Ok(amode_output) = address(self) {
-                self.current_instruction.as_mut().unwrap().amode_output = amode_output;
+                self.i.as_mut().unwrap().amode_output = amode_output;
             } else {
                 panic!("Failed addressing");
             }
 
-            let execute = self.current_instruction.as_ref().unwrap().fun;
+            let execute = self.i.as_ref().unwrap().fun;
             execute(self);
         }
 
@@ -257,24 +320,37 @@ impl Cpu {
     }
 
     /// **inthandle()** - Handles any interrupts of the cpu.
-    /// The different kinds of intterrupts which the MOST 6502 supports
+    /// The different kinds of intterrupts which the MOS 6502 supports
     /// are BRK (software interrupt), IRQ (interrupt request) and
     /// NMI (non-maskable interrupt).
     /// NMIs cannot be disabled.
     /// In order to allow IRQs, the flag `irq_disabled` in the status
     /// register has to be clear.
-    fn inthandle(&mut self) -> bool {
-        let nmi_flag: bool = self.interrupt_handles().pending_nmi();
-        let mut irq_flag: bool = self.interrupt_handles().pending_irq();
-        irq_flag &= !self.regset().irq_disabled();
+    fn inthandle(&mut self, int: InterruptKind) -> bool {
 
-        let is_interrupted = nmi_flag || irq_flag;
-
-        if !is_interrupted {
+        if int == Irq && self.regset().irq_disabled() {
             return false;
         }
 
-        return true;
+        let prog_counter = self.regset().prog_counter();
+        self.stk_doublepush(prog_counter);
+
+        self.regset_mut().set_brk(false);
+        self.regset_mut().set_unused(true);
+        self.regset_mut().set_irq_disabled(true);
+
+        let status = self.regset().status();
+        self.stk_push(status);
+
+        let (next_address, time) = match int {
+            InterruptKind::Nmi => (0xFFFA, 8),
+            InterruptKind::Irq => (0xFFFE, 7),
+        };
+
+        let new_pc = self.read_word(next_address);
+        *self.regset_mut().set_prog_counter(new_pc);
+        *self.time_mut().residual_mut() = time;
+        true
     }
 
     /// **reset()** - Performs a reset to the internal state of the cpu
@@ -380,7 +456,7 @@ pub trait CommunicationInterface {
     fn read_seq(&self, address: Address, len: u16) -> Option<Vec<Byte>>;
 }
 
-const RAM_SIZE: usize = 0xffff;
+const RAM_SIZE: usize = 0xffff + 1;
 
 /// The "host" of our cpu
 /// Contains the contexual environment of the processor, most notably - memory.
@@ -740,60 +816,115 @@ mod m6502_intruction_set {
     use super::Cpu;
 
     pub fn adc(_cpu: &mut Cpu) {}
+
     pub fn and(_cpu: &mut Cpu) {}
+
     pub fn asl(_cpu: &mut Cpu) {}
+
     pub fn bcc(_cpu: &mut Cpu) {}
+
     pub fn bcs(_cpu: &mut Cpu) {}
+
     pub fn beq(_cpu: &mut Cpu) {}
+
     pub fn bit(_cpu: &mut Cpu) {}
+
     pub fn bmi(_cpu: &mut Cpu) {}
+
     pub fn bne(_cpu: &mut Cpu) {}
+
     pub fn bpl(_cpu: &mut Cpu) {}
+
     pub fn brk(_cpu: &mut Cpu) {}
+
     pub fn bvc(_cpu: &mut Cpu) {}
+
     pub fn bvs(_cpu: &mut Cpu) {}
+
     pub fn clc(_cpu: &mut Cpu) {}
+
     pub fn cld(_cpu: &mut Cpu) {}
+
     pub fn cli(_cpu: &mut Cpu) {}
+
     pub fn clv(_cpu: &mut Cpu) {}
+
     pub fn cmp(_cpu: &mut Cpu) {}
+
     pub fn cpx(_cpu: &mut Cpu) {}
+
     pub fn cpy(_cpu: &mut Cpu) {}
+
     pub fn dec(_cpu: &mut Cpu) {}
+
     pub fn dex(_cpu: &mut Cpu) {}
+
     pub fn dey(_cpu: &mut Cpu) {}
+
     pub fn eor(_cpu: &mut Cpu) {}
+
     pub fn inc(_cpu: &mut Cpu) {}
+
     pub fn inx(_cpu: &mut Cpu) {}
+
     pub fn iny(_cpu: &mut Cpu) {}
+
     pub fn jmp(_cpu: &mut Cpu) {}
+
     pub fn jsr(_cpu: &mut Cpu) {}
+
     pub fn lda(_cpu: &mut Cpu) {}
+
     pub fn ldx(_cpu: &mut Cpu) {}
+
     pub fn ldy(_cpu: &mut Cpu) {}
+
     pub fn lsr(_cpu: &mut Cpu) {}
+
     pub fn nop(_cpu: &mut Cpu) {}
+
     pub fn ora(_cpu: &mut Cpu) {}
+
     pub fn pha(_cpu: &mut Cpu) {}
+
     pub fn php(_cpu: &mut Cpu) {}
+
     pub fn pla(_cpu: &mut Cpu) {}
+
     pub fn plp(_cpu: &mut Cpu) {}
+
     pub fn rol(_cpu: &mut Cpu) {}
+
     pub fn ror(_cpu: &mut Cpu) {}
+
     pub fn rti(_cpu: &mut Cpu) {}
+
     pub fn rts(_cpu: &mut Cpu) {}
+
     pub fn sbc(_cpu: &mut Cpu) {}
+
     pub fn sec(_cpu: &mut Cpu) {}
+
     pub fn sed(_cpu: &mut Cpu) {}
+
     pub fn sei(_cpu: &mut Cpu) {}
+
     pub fn sta(_cpu: &mut Cpu) {}
+
     pub fn stx(_cpu: &mut Cpu) {}
+
     pub fn sty(_cpu: &mut Cpu) {}
+
     pub fn tax(_cpu: &mut Cpu) {}
+
     pub fn tay(_cpu: &mut Cpu) {}
+
     pub fn tsx(_cpu: &mut Cpu) {}
+
     pub fn txa(_cpu: &mut Cpu) {}
+
     pub fn txs(_cpu: &mut Cpu) {}
+
     pub fn tya(_cpu: &mut Cpu) {}
 }
 
@@ -803,7 +934,6 @@ mod m6502_intruction_set {
 ///
 ///
 mod m6502_addressing_modes {
-    
     use super::{Address, Byte, Opcode, Word};
     use super::{AddressingOutput, AddressingOutput::*, CpuError, CpuError::*};
     use super::{Cpu, Instruction, MainBus};
@@ -819,8 +949,7 @@ mod m6502_addressing_modes {
     /// 
     /// FIXME FIXME FIXME -- I AM UGLY!
     pub fn prepare_operands(cpu: &mut Cpu) {
-
-        if cpu.current_instruction.is_none() {
+        if cpu.i.is_none() {
             return;
         }
 
@@ -842,12 +971,10 @@ mod m6502_addressing_modes {
         let IND: usize = indirect_am as usize;
         let REL: usize = relative_am as usize;
 
-        let am = cpu.current_instruction.as_ref().unwrap().amode as usize;
+        let am = cpu.i.as_ref().unwrap().amode as usize;
 
-        let num_fetched = if am == IMP { 0 }
-            else if vec![IMM, ZP0, ZPX, ZPY, INY, INX, REL].contains(&am) { 1 }
-            else if vec![ABS, ABX, ABY, IND].contains(&am) { 2 }
-            else { panic!("Unknown addressing mode")
+        let num_fetched = if am == IMP { 0 } else if vec![IMM, ZP0, ZPX, ZPY, INY, INX, REL].contains(&am) { 1 } else if vec![ABS, ABX, ABY, IND].contains(&am) { 2 } else {
+            panic!("Unknown addressing mode")
         };
 
         let operand: Word = match num_fetched {
@@ -857,11 +984,11 @@ mod m6502_addressing_modes {
                 let lo = cpu.fetch();
                 let hi = cpu.fetch();
                 Word::from_le_bytes([lo, hi])
-            },
+            }
             _ => unreachable!("Unknown number of bytes for operand"),
         };
 
-        cpu.current_instruction.as_mut().unwrap().operand = Some(operand);
+        cpu.i.as_mut().unwrap().operand = Some(operand);
     }
 
     ///
@@ -902,7 +1029,7 @@ mod m6502_addressing_modes {
     /// is directly used as a value.
     ///
     pub fn immediate_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
         if let Some(operand) = i.operand {
             let fetched = Fetched(operand as u8);
             Ok(fetched)
@@ -920,10 +1047,10 @@ mod m6502_addressing_modes {
     /// for address value (6502 addresses are 16-bit).
     ///
     pub fn zeropage_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        match read_from_operand_with_offset(cpu, 0, true) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
-        }
+        return match read_from_operand_with_offset(cpu, 0, true) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
+        };
     }
 
     ///
@@ -935,10 +1062,10 @@ mod m6502_addressing_modes {
     ///
     pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().x_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, true) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
-        }
+        return match read_from_operand_with_offset(cpu, offset, true) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
+        };
     }
 
     ///
@@ -949,9 +1076,9 @@ mod m6502_addressing_modes {
     ///
     pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().y_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, true) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
+        return match read_from_operand_with_offset(cpu, offset, true) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
         };
     }
 
@@ -965,7 +1092,7 @@ mod m6502_addressing_modes {
         offset: Address,
         zeropage: bool,
     ) -> Result<Byte, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
         if let Some(mut operand) = i.operand {
             operand += offset;
             if zeropage {
@@ -988,10 +1115,10 @@ mod m6502_addressing_modes {
     /// acquired and then read from.
     ///
     pub fn absolute_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        match read_from_operand_with_offset(cpu, 0, false) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
-        }
+        return match read_from_operand_with_offset(cpu, 0, false) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
+        };
     }
 
     ///
@@ -1002,10 +1129,10 @@ mod m6502_addressing_modes {
     /// before actually reading the value.
     pub fn absolute_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().x_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, false) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
-        }
+        return match read_from_operand_with_offset(cpu, offset, false) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
+        };
     }
 
     ///
@@ -1018,10 +1145,10 @@ mod m6502_addressing_modes {
     /// into a helping routine.
     pub fn absolute_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().y_index() as Address;
-        match read_from_operand_with_offset(cpu, offset, false) {
-            Ok(value) => return Ok(Fetched(value)),
-            Err(e) => return Err(e),
-        }
+        return match read_from_operand_with_offset(cpu, offset, false) {
+            Ok(value) => Ok(Fetched(value)),
+            Err(e) => Err(e),
+        };
     }
 
     ///
@@ -1031,7 +1158,7 @@ mod m6502_addressing_modes {
     /// This offset is then added to the program counter.
     ///
     pub fn relative_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
         if let Some(operand) = i.operand {
             let operand_u8 = operand as u8;
             let value = cpu.pc().wrapping_add(signedbyte_to_word(operand_u8));
@@ -1056,7 +1183,7 @@ mod m6502_addressing_modes {
     /// This operation has a hardware bug when
     /// a page boundary is crossed.
     pub fn indirect_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
         if let Some(ptr) = i.operand {
             // Simulate hardware bug
             let page_crossed = (ptr & 0x00FF) == 0x00FF;
@@ -1080,7 +1207,7 @@ mod m6502_addressing_modes {
     /// location in the zero page. Then the actual
     /// address is read.
     pub fn indirect_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
 
         if let Some(base_u16) = i.operand {
             let base = base_u16 as Byte;
@@ -1100,7 +1227,7 @@ mod m6502_addressing_modes {
     }
 
     pub fn indirect_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let i = cpu.current_instruction.as_ref().unwrap();
+        let i = cpu.i.as_ref().unwrap();
 
         if let Some(base_u16) = i.operand {
             let lo = cpu.read_byte(base_u16);
@@ -1133,8 +1260,8 @@ mod m6502_addressing_modes {
         fn setup(custom_pc: Word, connect: bool, opcode: Opcode, operand: Option<Word>) -> Cpu {
             let mut cpu = Cpu::new_custompc(custom_pc);
 
-            cpu.current_instruction = Some(Instruction::decode_by(opcode));
-            cpu.current_instruction.as_mut().unwrap().operand = operand;
+            cpu.i = Some(Instruction::decode_by(opcode));
+            cpu.i.as_mut().unwrap().operand = operand;
 
             if connect {
                 cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
@@ -1347,11 +1474,11 @@ mod m6502_addressing_modes {
         #[test]
         fn test__prepare_operands_zero() {
             let mut cpu = setup(0x0000, true, 0x00, None);
-            cpu.current_instruction = Some(Instruction::decode_by(0x08));
+            cpu.i = Some(Instruction::decode_by(0x08));
 
             prepare_operands(&mut cpu);
 
-            let i = cpu.current_instruction.unwrap();
+            let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0xBEEF);
         }
@@ -1359,13 +1486,13 @@ mod m6502_addressing_modes {
         #[test]
         fn test__prepare_operands_one() {
             let mut cpu = setup(0x001, true, 0x00, None);
-            cpu.current_instruction = Some(Instruction::decode_by(0xA9));
+            cpu.i = Some(Instruction::decode_by(0xA9));
             cpu.writ_byte(0x0001, 0x10);
 
             prepare_operands(&mut cpu);
 
             assert_eq!(cpu.pc(), 0x02);
-            let i = cpu.current_instruction.unwrap();
+            let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0x10);
         }
@@ -1373,14 +1500,14 @@ mod m6502_addressing_modes {
         #[test]
         fn test__prepare_operands_two() {
             let mut cpu = setup(0x001, true, 0x00, None);
-            cpu.current_instruction = Some(Instruction::decode_by(0xAD));
+            cpu.i = Some(Instruction::decode_by(0xAD));
             cpu.writ_byte(0x0001, 0x10);
             cpu.writ_byte(0x0002, 0x11);
 
             prepare_operands(&mut cpu);
 
             assert_eq!(cpu.pc(), 0x03);
-            let i = cpu.current_instruction.unwrap();
+            let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0x1110);
         }
@@ -1397,12 +1524,12 @@ const STACK_OFFSET: Address = 0x100;
 
 impl Cpu {
     /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
-    /// **NB:** This routine will fail if no interface is connected.
+    /// Note that this routine will fail if no interface is connected.
     fn stk_push(&mut self, data: Byte) {
         let mut stk_ptr = self.regset().stk_ptr();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         self.writ_byte(addr, data);
-        stk_ptr = stk_ptr.wrapping_sub(2);
+        stk_ptr = stk_ptr.wrapping_sub(1);
         *self.regset_mut().stk_ptr_mut() = stk_ptr;
     }
 
@@ -1415,7 +1542,7 @@ impl Cpu {
     /// **NB:** This routine will fail if no 2 passed; 0 failinterface is connected.
     fn stk_pop(&mut self) -> Byte {
         let mut stk_ptr = self.regset().stk_ptr();
-        stk_ptr = stk_ptr.wrapping_add(2);
+        stk_ptr = stk_ptr.wrapping_add(1);
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         let data = self.read_byte(addr);
         *self.regset_mut().stk_ptr_mut() = stk_ptr;
@@ -1473,16 +1600,12 @@ impl Cpu {
     /// **load_file()**  - Given a filename of a binary source file, load the data in memory
     /// starting from address `begin`. If `start_it` is true, the program counter should
     /// be set to `begin` and execute the code.
-    fn load_file<'a>(
+    fn load_file(
         &mut self,
-        filename: &'a str,
+        filename: &str,
         begin: Address,
         start_it: bool,
     ) -> Result<Address, CpuError> {
-        use std::env::current_dir;
-
-        let path = current_dir().unwrap().display();
-
         let mut program: Vec<Byte> = Vec::new();
         if let Ok(mut file) = File::open(filename) {
             if let Ok(_) = file.read_to_end(&mut program) {
@@ -1496,7 +1619,6 @@ impl Cpu {
 
 #[cfg(test)]
 mod test {
-
     use super::*;
 
     #[test]
@@ -1670,7 +1792,7 @@ mod test {
     fn test__load_binary_file_program() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-        
+
         let expected_asm = vec![
             Instruction::decode_by(0xA9), // lda #$02
             Instruction::decode_by(0x85), // eor  $02
@@ -1690,10 +1812,73 @@ mod test {
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
         let wrapped_old_pc = cpu.load_file("src/test.bin", 0x8000, true);
+
         cpu.clock_cycle();
 
-        assert_eq!(cpu.current_instruction.as_ref().unwrap().amode_output, AddressingOutput::Fetched(0x02));
+        assert_eq!(cpu.i.as_ref().unwrap().amode_output, AddressingOutput::Fetched(0x02));
         assert_eq!(cpu.pc(), 0x8002);
         assert_eq!(wrapped_old_pc.ok(), Some(0x0000));
+    }
+
+    #[test]
+    fn test__handle_irq_correct() {
+        let mut cpu = Cpu::new_custompc(0x0000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+        cpu.writ_byte(0xFFFE, 0x00);
+        cpu.writ_byte(0xFFFF, 0x20);
+        cpu.writ_byte(0x2000, 0xA9);
+        cpu.writ_byte(0x2001, 0x10);
+        cpu.regset_mut().set_irq_disabled(false);
+
+        let success = cpu.inthandle(Irq);
+        // irq cycles
+        for _ in 0..7 { cpu.clock_cycle(); }
+        // "lda #10" cycles
+        for _ in 0..2 { cpu.clock_cycle(); }
+
+        assert_eq!(success, true);
+        assert_eq!(cpu.time.residual, 0);
+        assert_eq!(cpu.pc(), 0x2002);
+        assert_eq!(cpu.regset.irq_disabled(), true);
+    }
+
+    #[test]
+    fn test__handle_irq_incorrect() {
+        let mut cpu = Cpu::new_custompc(0x0000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+        cpu.writ_byte(0xFFFE, 0x00);
+        cpu.writ_byte(0xFFFF, 0x20);
+        cpu.writ_byte(0x2000, 0xA9);
+        cpu.writ_byte(0x2001, 0x10);
+        cpu.regset_mut().set_irq_disabled(true);
+
+        let success = cpu.inthandle(InterruptKind::Irq);
+
+        assert_eq!(success, false);
+        assert_eq!(cpu.time.residual, 0);
+        assert_eq!(cpu.pc(), 0x0000);
+        assert_eq!(cpu.regset.irq_disabled(), true);
+    }
+
+    #[test]
+    fn test__handle_nmi() {
+        let mut cpu = Cpu::new_custompc(0x0000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+        cpu.writ_byte(0xFFFA, 0x00);
+        cpu.writ_byte(0xFFFB, 0x20);
+        cpu.writ_byte(0x2000, 0xA9);
+        cpu.writ_byte(0x2001, 0x10);
+        cpu.regset_mut().set_irq_disabled(true);
+
+        let success = cpu.inthandle(InterruptKind::Nmi);
+        // irq cycles
+        for _ in 0..8 { cpu.clock_cycle(); }
+        // "lda #10" cycles
+        for _ in 0..2 { cpu.clock_cycle(); }
+
+        assert_eq!(success, true);
+        assert_eq!(cpu.time.residual, 0);
+        assert_eq!(cpu.pc(), 0x2002);
+        assert_eq!(cpu.regset.irq_disabled(), true);
     }
 }
