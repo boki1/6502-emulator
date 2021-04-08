@@ -2,6 +2,8 @@ use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
 use std::fmt::Debug;
 use std::rc::Rc;
+use std::fs::File;
+use std::{io, io::prelude::*};
 
 pub type Address = u16;
 pub type Word = u16;
@@ -162,10 +164,12 @@ pub struct Cpu {
     current_instruction: Option<Instruction>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CpuError {
     BusInterfaceMissing,
     CurrentInstructionMissing,
-    ExpectedOperandMissing
+    ExpectedOperandMissing,
+    FailedLoadingProgram,
 }
 
 impl Cpu {
@@ -1323,9 +1327,9 @@ impl Cpu {
 
     /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
     /// starting from `begin` in memory.
-    fn load_program(&mut self, program: &Vec<Byte>, begin: Address, limit: u16) -> Result<(), ()> {
+    fn load_program(&mut self, program: &Vec<Byte>, begin: Address, limit: u16, start_it: bool) -> Result<Address, CpuError> {
         if self.bus_conn.is_none() {
-            return Err(());
+            return Err(CpuError::BusInterfaceMissing);
         }
 
         let end = begin + limit;
@@ -1334,7 +1338,12 @@ impl Cpu {
             self.writ_byte(address, program[index]);
         }
 
-        Ok(())
+        let saved_pc = self.pc();
+        if start_it {
+            *self.regset_mut().prog_counter_mut() = begin;
+        }
+
+        Ok(saved_pc)
     }
 
     /// **load_file()**  - Given a filename of a binary source file, load the data in memory
@@ -1345,16 +1354,20 @@ impl Cpu {
         filename: &'a str,
         begin: Address,
         start_it: bool,
-    ) -> Result<(), ()> {
-        // Read from file
+    ) -> Result<Address, CpuError> {
 
-        // return `load_program(binary_source, begin, binary_source.len())`
+        use std::env::current_dir;
 
-        if start_it {
-            // move `self.regset.prog_counter` to `begin`
+        let path = current_dir().unwrap().display();
+
+        let mut program: Vec<Byte> = Vec::new();
+        if let Ok(mut file) = File::open(filename) {
+            if let Ok(_) = file.read_to_end(&mut program) {
+                return self.load_program(&program, begin, program.len() as u16, start_it);
+            }
         }
 
-        Err(())
+        Err(CpuError::FailedLoadingProgram)
     }
 }
 
@@ -1476,7 +1489,7 @@ mod test {
 
     #[test]
     fn test__load_program() {
-        let mut cpu = Cpu::new_custompc(0x8000);
+        let mut cpu = Cpu::new_custompc(0x1000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
         let prog: Vec<Byte> = vec![
@@ -1505,8 +1518,8 @@ mod test {
 
         let len = prog.len() as u16;
 
-        let res = cpu.load_program(&prog, 0x8000, len);
-        assert_eq!(res, Ok(()));
+        let old_pc = cpu.load_program(&prog, 0x8000, len, true);
+        assert_eq!(old_pc.ok(), Some(0x1000));
 
         let read = cpu.read_some(0x8000, len);
         assert_eq!(read, prog);
@@ -1514,10 +1527,10 @@ mod test {
 
     #[test]
     fn test__load_program_and_disassemble() {
-        let mut cpu = Cpu::new_custompc(0x8000);
+        let mut cpu = Cpu::new_custompc(0x1000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         let prog: Vec<Byte> = vec![162, 10, 142, 0, 0, 162, 3];
-        cpu.load_program(&prog, 0x8000, 7);
+        let old_pc = cpu.load_program(&prog, 0x8000, 7, true);
         let expected_asm = vec![
             Instruction::decode_by(162),
             Instruction::decode_by(142),
@@ -1526,6 +1539,25 @@ mod test {
 
         let asm = cpu.disassemble(0x8000, 7);
 
+        assert_eq!(old_pc, Ok(0x1000));
         assert_eq!(asm.ok(), Some(expected_asm));
+    }
+
+    #[test]
+    fn test__load_binary_file_program() {
+        let mut cpu = Cpu::new_custompc(0x0000);
+        cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+        
+        let expected_asm = vec![
+            Instruction::decode_by(0xA9),
+            Instruction::decode_by(0x85),
+            Instruction::decode_by(0xA9),
+        ];
+
+        let old_pc = cpu.load_file("src/test.bin", 0x8000, true);
+
+        let asm = cpu.disassemble(0x8000, 6);
+        assert_eq!(old_pc, Ok(0x0000));
+        assert_eq!(asm.ok(), Some(expected_asm)); 
     }
 }
