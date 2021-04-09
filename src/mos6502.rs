@@ -7,6 +7,7 @@ use std::{io, io::prelude::*};
 use crate::mos6502::m6502_intruction_set::sta;
 use std::ops::Add;
 use crate::mos6502::InterruptKind::Irq;
+use crate::mos6502::m6502_addressing_modes::load_operand;
 
 pub type Address = u16;
 pub type Word = u16;
@@ -150,7 +151,7 @@ pub struct InterruptHandling {
 #[derive(Debug, Copy, Clone, PartialEq)]
 pub enum InterruptKind {
     Nmi,
-    Irq
+    Irq,
 }
 
 /// **Jump vectors**
@@ -166,10 +167,8 @@ const IRQ_VECTOR: Address = 0xfffe;
 ///
 /// The struct representation of the MOS 6502.
 ///
-
 #[derive(Getters, CopyGetters, Setters, MutGetters)]
 pub struct Cpu {
-
     /// **regset**
     /// The set of register that the cpu has
     #[getset(get_copy = "pub", get_mut = "pub")]
@@ -273,7 +272,7 @@ impl Cpu {
 
     /// **new_connected()** - Creates a new instance of a cpu with a bus interface
     /// supported
-    fn new_connected(bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>) -> Self {
+    pub(crate) fn new_connected(bus_conn: Option<Rc<RefCell<dyn CommunicationInterface>>>) -> Self {
         Self {
             bus_conn,
             ..Cpu::new()
@@ -296,16 +295,16 @@ impl Cpu {
     /// skipped/wasted after each actual instruction
     /// execution.
     fn clock_cycle(&mut self) {
-        use m6502_addressing_modes::prepare_operands;
+        use m6502_addressing_modes::load_operand_curr_i;
 
         if self.time.residual() == 0 {
             let opcode = self.fetch();
 
             self.i = Some(Instruction::decode_by(opcode));
             *self.time_mut().residual_mut() = self.i.as_ref().unwrap().time;
-            prepare_operands(self);
+            load_operand_curr_i(self);
 
-            let address = self.i.as_ref().unwrap().amode;
+            let address = self.i.as_ref().unwrap().amode_fun;
             if let Ok(amode_output) = address(self) {
                 self.i.as_mut().unwrap().amode_output = amode_output;
             } else {
@@ -327,7 +326,6 @@ impl Cpu {
     /// In order to allow IRQs, the flag `irq_disabled` in the status
     /// register has to be clear.
     fn inthandle(&mut self, int: InterruptKind) -> bool {
-
         if int == Irq && self.regset().irq_disabled() {
             return false;
         }
@@ -465,7 +463,7 @@ pub struct MainBus {
 }
 
 impl MainBus {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         Self {
             mem: vec![0x0; RAM_SIZE],
         }
@@ -516,12 +514,14 @@ macro_rules! make_instr {
     ($p_amode: ident, $p_fun: ident, $p_time: expr, $p_mnemonic: literal, $p_size: expr) => {
         Instruction {
             amode: $p_amode,
+            amode_fun: m6502_addressing_modes::to_fun($p_amode),
             fun: $p_fun,
             time: $p_time,
             mnemonic: String::from($p_mnemonic),
             size: $p_size,
             amode_output: AddressingOutput::NotExecuted,
             operand: None,
+            loaded_at: 0x0000,
         }
     };
 }
@@ -543,6 +543,22 @@ pub enum AddressingOutput {
     NotExecuted,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub enum AddressingMode {
+    Imp,
+    Imm,
+    Zp0,
+    Zpx,
+    Zpy,
+    Abs,
+    Abx,
+    Aby,
+    Ind,
+    Iny,
+    Inx,
+    Rel,
+}
+
 ///
 /// Instruction
 ///
@@ -557,7 +573,8 @@ pub enum AddressingOutput {
 pub struct Instruction {
     ///
     /// Meta information
-    amode: AddressingModeFn,
+    amode_fun: AddressingModeFn,
+    amode: AddressingMode,
     fun: InstructionFn,
     time: u8,
     mnemonic: String,
@@ -581,6 +598,32 @@ pub struct Instruction {
     /// \
     /// It is modified **only from the function `amode`.
     amode_output: AddressingOutput,
+
+    /// **loaded_at** - The address where the first byte of this
+    /// instruction is located in memory
+    ///
+    /// Unused in the current implementation.
+    loaded_at: Address,
+}
+
+impl ToString for Instruction {
+    fn to_string(&self) -> String {
+        if self.operand.is_none() {
+            return "Bad instruction -- no operand".to_string();
+        }
+
+        // prefix -> #, $
+        let operand_prefix = String::new();
+        // suffix -> X, Y, etc.
+        let operand_suffix = String::new();
+
+        format!("{:#06x}:    {}{}{}",
+                self.loaded_at,
+                operand_prefix,
+                self.mnemonic.to_uppercase(),
+                operand_suffix
+        )
+    }
 }
 
 impl Debug for Instruction {
@@ -599,7 +642,23 @@ impl PartialEq for Instruction {
             && self.mnemonic == other.mnemonic
             && self.size == other.size
             && self.fun as usize == other.fun as usize
-            && self.amode as usize == other.amode as usize
+            && self.amode_fun as usize == other.amode_fun as usize
+    }
+}
+
+impl Clone for Instruction {
+    fn clone(&self) -> Self {
+        Self {
+            amode_fun: self.amode_fun,
+            amode: self.amode,
+            fun: self.fun,
+            time: self.time,
+            mnemonic: self.mnemonic.clone(),
+            size: self.size,
+            operand: self.operand.clone(),
+            amode_output: self.amode_output,
+            loaded_at: self.loaded_at
+        }
     }
 }
 
@@ -617,6 +676,7 @@ impl Instruction {
     ///
     fn decode_by(opcode: Byte) -> Instruction {
         use m6502_addressing_modes::*;
+        use AddressingMode::*;
         use m6502_intruction_set::*;
 
         return match opcode {
@@ -627,172 +687,172 @@ impl Instruction {
             //              instruction_name,
             //              size
             //          )
-            0x00 => make_instr!(implied_am, brk, 7, "brk", 1),
-            0x01 => make_instr!(indirect_x_am, ora, 6, "ora", 2),
-            0x05 => make_instr!(zeropage_am, ora, 3, "ora", 2),
-            0x06 => make_instr!(zeropage_am, asl, 5, "asl", 2),
-            0x08 => make_instr!(implied_am, php, 3, "php", 1),
-            0x09 => make_instr!(immediate_am, ora, 2, "ora", 2),
-            0x0A => make_instr!(implied_am, asl, 2, "asl", 1),
-            0x0D => make_instr!(absolute_am, ora, 4, "ora", 3),
-            0x0E => make_instr!(absolute_am, asl, 6, "asl", 3),
+            0x00 => make_instr!(Imp, brk, 7, "brk", 1),
+            0x01 => make_instr!(Inx, ora, 6, "ora", 2),
+            0x05 => make_instr!(Zp0, ora, 3, "ora", 2),
+            0x06 => make_instr!(Zp0, asl, 5, "asl", 2),
+            0x08 => make_instr!(Imp, php, 3, "php", 1),
+            0x09 => make_instr!(Imm, ora, 2, "ora", 2),
+            0x0A => make_instr!(Imp, asl, 2, "asl", 1),
+            0x0D => make_instr!(Abs, ora, 4, "ora", 3),
+            0x0E => make_instr!(Abs, asl, 6, "asl", 3),
 
-            0x10 => make_instr!(relative_am, bpl, 2 /* or 3 */, "bpl", 2),
-            0x11 => make_instr!(indirect_y_am, ora, 5, "ora", 2),
-            0x15 => make_instr!(zeropage_x_am, ora, 4, "ora", 2),
-            0x16 => make_instr!(zeropage_x_am, asl, 6, "asl", 2),
-            0x18 => make_instr!(implied_am, clc, 2, "clc", 1),
-            0x19 => make_instr!(absolute_y_am, ora, 4, "ora", 3),
-            0x1D => make_instr!(absolute_x_am, ora, 4, "ora", 3),
-            0x1E => make_instr!(absolute_x_am, asl, 7, "asl", 3),
+            0x10 => make_instr!(Rel, bpl, 2 /* or 3 */, "bpl", 2),
+            0x11 => make_instr!(Iny, ora, 5, "ora", 2),
+            0x15 => make_instr!(Zpx, ora, 4, "ora", 2),
+            0x16 => make_instr!(Zpx, asl, 6, "asl", 2),
+            0x18 => make_instr!(Imp, clc, 2, "clc", 1),
+            0x19 => make_instr!(Aby, ora, 4, "ora", 3),
+            0x1D => make_instr!(Abx, ora, 4, "ora", 3),
+            0x1E => make_instr!(Abx, asl, 7, "asl", 3),
 
-            0x20 => make_instr!(absolute_am, jsr, 6, "jsr", 3),
-            0x21 => make_instr!(indirect_x_am, and, 6, "and", 2),
-            0x24 => make_instr!(zeropage_am, bit, 3, "bit", 2),
-            0x25 => make_instr!(zeropage_am, and, 3, "and", 2),
-            0x26 => make_instr!(zeropage_am, rol, 5, "rol", 2),
-            0x28 => make_instr!(implied_am, plp, 4, "plp", 1),
-            0x29 => make_instr!(immediate_am, and, 2, "and", 2),
-            0x2A => make_instr!(implied_am, rol, 2, "rol", 1),
-            0x2C => make_instr!(absolute_am, bit, 4, "bit", 3),
-            0x2D => make_instr!(absolute_am, and, 4, "and", 3),
-            0x2E => make_instr!(absolute_am, rol, 6, "rol", 3),
+            0x20 => make_instr!(Abs, jsr, 6, "jsr", 3),
+            0x21 => make_instr!(Inx, and, 6, "and", 2),
+            0x24 => make_instr!(Zp0, bit, 3, "bit", 2),
+            0x25 => make_instr!(Zp0, and, 3, "and", 2),
+            0x26 => make_instr!(Zp0, rol, 5, "rol", 2),
+            0x28 => make_instr!(Imp, plp, 4, "plp", 1),
+            0x29 => make_instr!(Imm, and, 2, "and", 2),
+            0x2A => make_instr!(Imp, rol, 2, "rol", 1),
+            0x2C => make_instr!(Abs, bit, 4, "bit", 3),
+            0x2D => make_instr!(Abs, and, 4, "and", 3),
+            0x2E => make_instr!(Abs, rol, 6, "rol", 3),
 
-            0x30 => make_instr!(relative_am, bmi, 2 /* or 3 */, "bmi", 2),
-            0x31 => make_instr!(indirect_y_am, and, 5, "and", 2),
-            0x35 => make_instr!(zeropage_x_am, and, 4, "and", 2),
-            0x36 => make_instr!(zeropage_x_am, rol, 6, "rol", 2),
-            0x38 => make_instr!(implied_am, sec, 2, "sec", 1),
-            0x39 => make_instr!(absolute_y_am, and, 4, "and", 3),
-            0x3D => make_instr!(absolute_x_am, and, 4, "and", 3),
-            0x3E => make_instr!(absolute_x_am, rol, 7, "rol", 3),
+            0x30 => make_instr!(Rel, bmi, 2 /* or 3 */, "bmi", 2),
+            0x31 => make_instr!(Iny, and, 5, "and", 2),
+            0x35 => make_instr!(Zpx, and, 4, "and", 2),
+            0x36 => make_instr!(Zpx, rol, 6, "rol", 2),
+            0x38 => make_instr!(Imp, sec, 2, "sec", 1),
+            0x39 => make_instr!(Aby, and, 4, "and", 3),
+            0x3D => make_instr!(Abx, and, 4, "and", 3),
+            0x3E => make_instr!(Abx, rol, 7, "rol", 3),
 
-            0x40 => make_instr!(implied_am, rti, 6, "rti", 1),
-            0x41 => make_instr!(indirect_x_am, eor, 6, "eor", 2),
-            0x45 => make_instr!(zeropage_am, eor, 3, "eor", 2),
-            0x46 => make_instr!(zeropage_am, lsr, 5, "lsr", 2),
-            0x48 => make_instr!(implied_am, pha, 3, "pha", 1),
-            0x49 => make_instr!(immediate_am, eor, 2, "eor", 2),
-            0x4A => make_instr!(implied_am, lsr, 2, "lsr", 1),
-            0x4C => make_instr!(absolute_am, jmp, 3, "jmp", 3),
-            0x4D => make_instr!(absolute_am, eor, 4, "eor", 3),
-            0x4E => make_instr!(absolute_am, lsr, 6, "lsr", 3),
+            0x40 => make_instr!(Imp, rti, 6, "rti", 1),
+            0x41 => make_instr!(Inx, eor, 6, "eor", 2),
+            0x45 => make_instr!(Zp0, eor, 3, "eor", 2),
+            0x46 => make_instr!(Zp0, lsr, 5, "lsr", 2),
+            0x48 => make_instr!(Imp, pha, 3, "pha", 1),
+            0x49 => make_instr!(Imm, eor, 2, "eor", 2),
+            0x4A => make_instr!(Imp, lsr, 2, "lsr", 1),
+            0x4C => make_instr!(Abs, jmp, 3, "jmp", 3),
+            0x4D => make_instr!(Abs, eor, 4, "eor", 3),
+            0x4E => make_instr!(Abs, lsr, 6, "lsr", 3),
 
-            0x50 => make_instr!(relative_am, bvc, 2 /* or 3 */, "bvc", 2),
-            0x51 => make_instr!(indirect_y_am, eor, 5, "eor", 2),
-            0x55 => make_instr!(zeropage_x_am, eor, 4, "eor", 2),
-            0x56 => make_instr!(zeropage_x_am, lsr, 6, "lsr", 2),
-            0x58 => make_instr!(implied_am, cli, 2, "cli", 1),
-            0x59 => make_instr!(absolute_y_am, eor, 4, "eor", 3),
-            0x5D => make_instr!(absolute_x_am, eor, 4, "eor", 3),
-            0x5E => make_instr!(absolute_x_am, lsr, 7, "lsr", 3),
+            0x50 => make_instr!(Rel, bvc, 2 /* or 3 */, "bvc", 2),
+            0x51 => make_instr!(Iny, eor, 5, "eor", 2),
+            0x55 => make_instr!(Zpx, eor, 4, "eor", 2),
+            0x56 => make_instr!(Zpx, lsr, 6, "lsr", 2),
+            0x58 => make_instr!(Imp, cli, 2, "cli", 1),
+            0x59 => make_instr!(Aby, eor, 4, "eor", 3),
+            0x5D => make_instr!(Abx, eor, 4, "eor", 3),
+            0x5E => make_instr!(Abx, lsr, 7, "lsr", 3),
 
-            0x60 => make_instr!(implied_am, rts, 6, "rts", 1),
-            0x61 => make_instr!(indirect_x_am, adc, 6, "adc", 2),
-            0x65 => make_instr!(zeropage_am, adc, 3, "adc", 2),
-            0x66 => make_instr!(zeropage_am, ror, 5, "ror", 2),
-            0x68 => make_instr!(implied_am, pla, 4, "pla", 1),
-            0x69 => make_instr!(immediate_am, adc, 2, "adc", 2),
-            0x6A => make_instr!(implied_am, ror, 2, "ror", 1),
-            0x6C => make_instr!(indirect_am, jmp, 5, "jmp", 3),
-            0x6D => make_instr!(absolute_am, adc, 4, "adc", 3),
-            0x6E => make_instr!(absolute_x_am, ror, 7, "ror", 3),
+            0x60 => make_instr!(Imp, rts, 6, "rts", 1),
+            0x61 => make_instr!(Inx, adc, 6, "adc", 2),
+            0x65 => make_instr!(Zp0, adc, 3, "adc", 2),
+            0x66 => make_instr!(Zp0, ror, 5, "ror", 2),
+            0x68 => make_instr!(Imp, pla, 4, "pla", 1),
+            0x69 => make_instr!(Imm, adc, 2, "adc", 2),
+            0x6A => make_instr!(Imp, ror, 2, "ror", 1),
+            0x6C => make_instr!(Ind, jmp, 5, "jmp", 3),
+            0x6D => make_instr!(Abs, adc, 4, "adc", 3),
+            0x6E => make_instr!(Abx, ror, 7, "ror", 3),
 
-            0x70 => make_instr!(relative_am, bvs, 2 /* or 3 */, "bvs", 2),
-            0x71 => make_instr!(indirect_y_am, adc, 5, "adc", 2),
-            0x75 => make_instr!(zeropage_x_am, adc, 4, "adc", 2),
-            0x76 => make_instr!(zeropage_x_am, ror, 6, "ror", 2),
-            0x78 => make_instr!(implied_am, sei, 2, "sei", 1),
-            0x79 => make_instr!(absolute_y_am, adc, 4, "adc", 3),
-            0x7D => make_instr!(absolute_x_am, adc, 4, "adc", 3),
-            0x7E => make_instr!(absolute_am, ror, 6, "ror", 6),
+            0x70 => make_instr!(Rel, bvs, 2 /* or 3 */, "bvs", 2),
+            0x71 => make_instr!(Iny, adc, 5, "adc", 2),
+            0x75 => make_instr!(Zpx, adc, 4, "adc", 2),
+            0x76 => make_instr!(Zpx, ror, 6, "ror", 2),
+            0x78 => make_instr!(Imp, sei, 2, "sei", 1),
+            0x79 => make_instr!(Aby, adc, 4, "adc", 3),
+            0x7D => make_instr!(Abx, adc, 4, "adc", 3),
+            0x7E => make_instr!(Abs, ror, 6, "ror", 6),
 
-            0x81 => make_instr!(indirect_x_am, sta, 6, "sta", 2),
-            0x84 => make_instr!(zeropage_am, sty, 3, "sty", 2),
-            0x85 => make_instr!(zeropage_am, sta, 3, "sta", 2),
-            0x86 => make_instr!(zeropage_am, stx, 3, "stx", 2),
-            0x88 => make_instr!(implied_am, dey, 2, "dey", 1),
-            0x8A => make_instr!(implied_am, txa, 2, "txa", 1),
-            0x8C => make_instr!(absolute_am, sty, 4, "sty", 3),
-            0x8D => make_instr!(absolute_am, sta, 4, "sta", 3),
-            0x8E => make_instr!(absolute_am, stx, 4, "stx", 3),
+            0x81 => make_instr!(Inx, sta, 6, "sta", 2),
+            0x84 => make_instr!(Zp0, sty, 3, "sty", 2),
+            0x85 => make_instr!(Zp0, sta, 3, "sta", 2),
+            0x86 => make_instr!(Zp0, stx, 3, "stx", 2),
+            0x88 => make_instr!(Imp, dey, 2, "dey", 1),
+            0x8A => make_instr!(Imp, txa, 2, "txa", 1),
+            0x8C => make_instr!(Abs, sty, 4, "sty", 3),
+            0x8D => make_instr!(Abs, sta, 4, "sta", 3),
+            0x8E => make_instr!(Abs, stx, 4, "stx", 3),
 
-            0x90 => make_instr!(relative_am, bcc, 2 /* or 3 */, "bcc", 2),
-            0x91 => make_instr!(indirect_y_am, sta, 6, "sta", 2),
-            0x94 => make_instr!(zeropage_x_am, sty, 4, "sty", 2),
-            0x95 => make_instr!(zeropage_x_am, sta, 4, "sta", 2),
-            0x96 => make_instr!(zeropage_y_am, stx, 4, "stx", 2),
-            0x98 => make_instr!(implied_am, tya, 2, "tya", 1),
-            0x99 => make_instr!(absolute_y_am, sta, 5, "sta", 3),
-            0x9A => make_instr!(implied_am, txs, 2, "txs", 1),
-            0x9D => make_instr!(absolute_x_am, sta, 5, "sta", 3),
+            0x90 => make_instr!(Rel, bcc, 2 /* or 3 */, "bcc", 2),
+            0x91 => make_instr!(Iny, sta, 6, "sta", 2),
+            0x94 => make_instr!(Zpx, sty, 4, "sty", 2),
+            0x95 => make_instr!(Zpx, sta, 4, "sta", 2),
+            0x96 => make_instr!(Zpy, stx, 4, "stx", 2),
+            0x98 => make_instr!(Imp, tya, 2, "tya", 1),
+            0x99 => make_instr!(Aby, sta, 5, "sta", 3),
+            0x9A => make_instr!(Imp, txs, 2, "txs", 1),
+            0x9D => make_instr!(Abx, sta, 5, "sta", 3),
 
-            0xA0 => make_instr!(immediate_am, ldy, 2, "ldy", 2),
-            0xA1 => make_instr!(indirect_x_am, lda, 6, "lda", 2),
-            0xA2 => make_instr!(immediate_am, ldx, 2, "ldx", 2),
-            0xA4 => make_instr!(zeropage_am, ldy, 3, "ldy", 2),
-            0xA5 => make_instr!(zeropage_am, lda, 3, "lda", 2),
-            0xA6 => make_instr!(zeropage_am, ldx, 3, "lda", 2),
-            0xA8 => make_instr!(implied_am, tay, 2, "tay", 1),
-            0xA9 => make_instr!(immediate_am, lda, 2, "lda", 2),
-            0xAA => make_instr!(implied_am, tax, 2, "tax", 1),
-            0xAC => make_instr!(absolute_am, ldy, 4, "ldy", 3),
-            0xAD => make_instr!(absolute_am, lda, 4, "lda", 3),
-            0xAE => make_instr!(absolute_am, ldx, 4, "ldx", 3),
+            0xA0 => make_instr!(Imm, ldy, 2, "ldy", 2),
+            0xA1 => make_instr!(Inx, lda, 6, "lda", 2),
+            0xA2 => make_instr!(Imm, ldx, 2, "ldx", 2),
+            0xA4 => make_instr!(Zp0, ldy, 3, "ldy", 2),
+            0xA5 => make_instr!(Zp0, lda, 3, "lda", 2),
+            0xA6 => make_instr!(Zp0, ldx, 3, "lda", 2),
+            0xA8 => make_instr!(Imp, tay, 2, "tay", 1),
+            0xA9 => make_instr!(Imm, lda, 2, "lda", 2),
+            0xAA => make_instr!(Imp, tax, 2, "tax", 1),
+            0xAC => make_instr!(Abs, ldy, 4, "ldy", 3),
+            0xAD => make_instr!(Abs, lda, 4, "lda", 3),
+            0xAE => make_instr!(Abs, ldx, 4, "ldx", 3),
 
-            0xB0 => make_instr!(relative_am, bcs, 2 /* or 3 */, "bcs", 2),
-            0xB1 => make_instr!(indirect_y_am, lda, 5, "lda", 2),
-            0xB4 => make_instr!(zeropage_x_am, ldy, 4, "ldy", 2),
-            0xB5 => make_instr!(zeropage_x_am, lda, 4, "lda", 2),
-            0xB6 => make_instr!(zeropage_y_am, ldx, 4, "ldx", 2),
-            0xB8 => make_instr!(implied_am, clv, 2, "clv", 1),
-            0xB9 => make_instr!(absolute_y_am, lda, 4, "lda", 3),
-            0xBA => make_instr!(implied_am, tsx, 2, "tsx", 1),
-            0xBC => make_instr!(absolute_x_am, ldy, 4, "ldy", 3),
-            0xBD => make_instr!(absolute_x_am, lda, 4, "lda", 3),
-            0xBE => make_instr!(absolute_y_am, ldx, 4, "ldx", 3),
+            0xB0 => make_instr!(Rel, bcs, 2 /* or 3 */, "bcs", 2),
+            0xB1 => make_instr!(Iny, lda, 5, "lda", 2),
+            0xB4 => make_instr!(Zpx, ldy, 4, "ldy", 2),
+            0xB5 => make_instr!(Zpx, lda, 4, "lda", 2),
+            0xB6 => make_instr!(Zpy, ldx, 4, "ldx", 2),
+            0xB8 => make_instr!(Imp, clv, 2, "clv", 1),
+            0xB9 => make_instr!(Aby, lda, 4, "lda", 3),
+            0xBA => make_instr!(Imp, tsx, 2, "tsx", 1),
+            0xBC => make_instr!(Abx, ldy, 4, "ldy", 3),
+            0xBD => make_instr!(Abx, lda, 4, "lda", 3),
+            0xBE => make_instr!(Aby, ldx, 4, "ldx", 3),
 
-            0xC0 => make_instr!(immediate_am, cpy, 2, "cpy", 2),
-            0xC1 => make_instr!(indirect_x_am, cmp, 6, "cmp", 2),
-            0xC4 => make_instr!(zeropage_am, cpy, 3, "cpy", 2),
-            0xC5 => make_instr!(zeropage_am, cmp, 3, "cmp", 2),
-            0xC6 => make_instr!(zeropage_am, dec, 5, "dec", 2),
-            0xC8 => make_instr!(implied_am, iny, 2, "iny", 1),
-            0xC9 => make_instr!(immediate_am, cmp, 2, "cmp", 2),
-            0xCA => make_instr!(implied_am, dex, 2, "dex", 1),
-            0xCC => make_instr!(absolute_am, cpy, 4, "cpy", 3),
-            0xCD => make_instr!(absolute_am, cmp, 4, "cmp", 3),
-            0xCE => make_instr!(absolute_am, dec, 6, "dec", 3),
+            0xC0 => make_instr!(Imm, cpy, 2, "cpy", 2),
+            0xC1 => make_instr!(Inx, cmp, 6, "cmp", 2),
+            0xC4 => make_instr!(Zp0, cpy, 3, "cpy", 2),
+            0xC5 => make_instr!(Zp0, cmp, 3, "cmp", 2),
+            0xC6 => make_instr!(Zp0, dec, 5, "dec", 2),
+            0xC8 => make_instr!(Imp, iny, 2, "iny", 1),
+            0xC9 => make_instr!(Imm, cmp, 2, "cmp", 2),
+            0xCA => make_instr!(Imp, dex, 2, "dex", 1),
+            0xCC => make_instr!(Abs, cpy, 4, "cpy", 3),
+            0xCD => make_instr!(Abs, cmp, 4, "cmp", 3),
+            0xCE => make_instr!(Abs, dec, 6, "dec", 3),
 
-            0xD0 => make_instr!(relative_am, bne, 2 /* or 3 */, "bne", 2),
-            0xD1 => make_instr!(indirect_y_am, cmp, 5, "cmp", 2),
-            0xD5 => make_instr!(zeropage_x_am, cmp, 4, "cmp", 2),
-            0xD6 => make_instr!(zeropage_x_am, dec, 6, "dec", 2),
-            0xD8 => make_instr!(implied_am, cld, 2, "cld", 1),
-            0xD9 => make_instr!(absolute_y_am, cmp, 4, "cmp", 3),
-            0xDD => make_instr!(absolute_x_am, cmp, 4, "cmp", 3),
-            0xDE => make_instr!(absolute_x_am, dec, 7, "dec", 3),
+            0xD0 => make_instr!(Rel, bne, 2 /* or 3 */, "bne", 2),
+            0xD1 => make_instr!(Iny, cmp, 5, "cmp", 2),
+            0xD5 => make_instr!(Zpx, cmp, 4, "cmp", 2),
+            0xD6 => make_instr!(Zpx, dec, 6, "dec", 2),
+            0xD8 => make_instr!(Imp, cld, 2, "cld", 1),
+            0xD9 => make_instr!(Aby, cmp, 4, "cmp", 3),
+            0xDD => make_instr!(Abx, cmp, 4, "cmp", 3),
+            0xDE => make_instr!(Abx, dec, 7, "dec", 3),
 
-            0xE0 => make_instr!(immediate_am, cpx, 2, "cpx", 2),
-            0xE1 => make_instr!(indirect_x_am, sbc, 6, "sbc", 2),
-            0xE4 => make_instr!(zeropage_am, cpx, 3, "cpx", 2),
-            0xE5 => make_instr!(zeropage_am, sbc, 3, "sbc", 2),
-            0xE6 => make_instr!(zeropage_am, inc, 5, "inc", 2),
-            0xE8 => make_instr!(implied_am, inx, 2, "inx", 1),
-            0xE9 => make_instr!(immediate_am, sbc, 2, "sbc", 2),
-            0xEA => make_instr!(implied_am, nop, 2, "nop", 1),
-            0xEC => make_instr!(absolute_am, cpx, 4, "cpx", 3),
-            0xED => make_instr!(absolute_am, sbc, 4, "sbc", 3),
-            0xEE => make_instr!(absolute_am, inc, 6, "inc", 3),
+            0xE0 => make_instr!(Imm, cpx, 2, "cpx", 2),
+            0xE1 => make_instr!(Inx, sbc, 6, "sbc", 2),
+            0xE4 => make_instr!(Zp0, cpx, 3, "cpx", 2),
+            0xE5 => make_instr!(Zp0, sbc, 3, "sbc", 2),
+            0xE6 => make_instr!(Zp0, inc, 5, "inc", 2),
+            0xE8 => make_instr!(Imp, inx, 2, "inx", 1),
+            0xE9 => make_instr!(Imm, sbc, 2, "sbc", 2),
+            0xEA => make_instr!(Imp, nop, 2, "nop", 1),
+            0xEC => make_instr!(Abs, cpx, 4, "cpx", 3),
+            0xED => make_instr!(Abs, sbc, 4, "sbc", 3),
+            0xEE => make_instr!(Abs, inc, 6, "inc", 3),
 
-            0xF0 => make_instr!(relative_am, beq, 2 /* or 3 */, "beq", 2),
-            0xF1 => make_instr!(indirect_y_am, sbc, 5, "sbc", 2),
-            0xF5 => make_instr!(zeropage_x_am, sbc, 4, "sbc", 2),
-            0xF6 => make_instr!(zeropage_x_am, inc, 6, "inc", 2),
-            0xF8 => make_instr!(implied_am, sed, 2, "sed", 1),
-            0xF9 => make_instr!(absolute_y_am, sbc, 4, "sbc", 3),
-            0xFD => make_instr!(absolute_x_am, sbc, 4, "sbc", 3),
-            0xFE => make_instr!(absolute_x_am, inc, 7, "inc", 3),
+            0xF0 => make_instr!(Rel, beq, 2 /* or 3 */, "beq", 2),
+            0xF1 => make_instr!(Iny, sbc, 5, "sbc", 2),
+            0xF5 => make_instr!(Zpx, sbc, 4, "sbc", 2),
+            0xF6 => make_instr!(Zpx, inc, 6, "inc", 2),
+            0xF8 => make_instr!(Imp, sed, 2, "sed", 1),
+            0xF9 => make_instr!(Aby, sbc, 4, "sbc", 3),
+            0xFD => make_instr!(Abx, sbc, 4, "sbc", 3),
+            0xFE => make_instr!(Abx, inc, 7, "inc", 3),
 
             _ => make_illegal!(),
         };
@@ -940,41 +1000,41 @@ mod m6502_addressing_modes {
 
     use std::cell::RefCell;
     use std::rc::Rc;
+    use crate::mos6502::{AddressingMode, AddressingModeFn};
 
+    #[inline]
+    pub fn to_fun(amode: AddressingMode) -> AddressingModeFn {
+        return match amode {
+            AddressingMode::Imp => implied_am,
+            AddressingMode::Imm => immediate_am,
+            AddressingMode::Zp0 => zeropage_am,
+            AddressingMode::Zpx => zeropage_x_am,
+            AddressingMode::Zpy => zeropage_y_am,
+            AddressingMode::Abs => absolute_am,
+            AddressingMode::Abx => absolute_x_am,
+            AddressingMode::Aby => absolute_y_am,
+            AddressingMode::Ind => indirect_am,
+            AddressingMode::Iny => indirect_y_am,
+            AddressingMode::Inx => indirect_x_am,
+            AddressingMode::Rel => relative_am,
+        };
+    }
 
-    /// **prepare_operands()** - This is called right before
+    /// **load_operand_curr_i()** - This is called right before
     /// the addressing mode specifics are executed in order
     /// to fetch the required operand into the operand
     /// field in `i`.
-    /// 
-    /// FIXME FIXME FIXME -- I AM UGLY!
-    pub fn prepare_operands(cpu: &mut Cpu) {
+    pub fn load_operand_curr_i(cpu: &mut Cpu) {
+        use super::AddressingMode::*;
+
         if cpu.i.is_none() {
             return;
         }
 
-        /// TODO FIXME: This is incredibly ugly!!!
-        /// For some reason
-        /// "match ... { IMM | ZP0 | ZPX | ZPY => 1 }"
-        /// does not compile.
-        /// 
-        let IMP: usize = implied_am as usize;
-        let IMM: usize = immediate_am as usize;
-        let ZP0: usize = zeropage_am as usize;
-        let ZPX: usize = zeropage_x_am as usize;
-        let ZPY: usize = zeropage_y_am as usize;
-        let ABS: usize = absolute_am as usize;
-        let ABX: usize = absolute_x_am as usize;
-        let ABY: usize = absolute_y_am as usize;
-        let INY: usize = indirect_y_am as usize;
-        let INX: usize = indirect_x_am as usize;
-        let IND: usize = indirect_am as usize;
-        let REL: usize = relative_am as usize;
-
-        let am = cpu.i.as_ref().unwrap().amode as usize;
-
-        let num_fetched = if am == IMP { 0 } else if vec![IMM, ZP0, ZPX, ZPY, INY, INX, REL].contains(&am) { 1 } else if vec![ABS, ABX, ABY, IND].contains(&am) { 2 } else {
-            panic!("Unknown addressing mode")
+        let num_fetched = match cpu.i.as_ref().unwrap().amode {
+            Imp => 0,
+            Imm | Zp0 | Zpx | Zpy | Inx | Iny | Rel => 1,
+            Abs | Abx | Aby | Ind => 2,
         };
 
         let operand: Word = match num_fetched {
@@ -988,7 +1048,32 @@ mod m6502_addressing_modes {
             _ => unreachable!("Unknown number of bytes for operand"),
         };
 
-        cpu.i.as_mut().unwrap().operand = Some(operand);
+        cpu.i.as_mut().unwrap().operand.replace(operand);
+    }
+
+
+    /// **load_operand()** - For any given instruction (only the addressing mode
+    /// is actually of importance here, fetch any operands that the instruction
+    /// requires taking into account that the address of the instruction in memory
+    /// is also provided.
+    pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
+        // Store previous state
+        let saved_pc = cpu.pc();
+        // The instruction has already been fetched
+        // so if address is where the instruction is
+        // then address + 1 is where the operand is.
+        *cpu.regset_mut().prog_counter_mut() = address.wrapping_add(1);
+
+        let saved_i = cpu.i.clone();
+        cpu.i.replace(i.clone());
+
+        load_operand_curr_i(cpu);
+
+        i.clone_from(&cpu.i.as_ref().unwrap());
+
+        // Restore previous state
+        cpu.i.clone_from(&saved_i);
+        *cpu.regset_mut().prog_counter_mut() = saved_pc;
     }
 
     ///
@@ -1476,7 +1561,7 @@ mod m6502_addressing_modes {
             let mut cpu = setup(0x0000, true, 0x00, None);
             cpu.i = Some(Instruction::decode_by(0x08));
 
-            prepare_operands(&mut cpu);
+            load_operand_curr_i(&mut cpu);
 
             let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
@@ -1489,7 +1574,7 @@ mod m6502_addressing_modes {
             cpu.i = Some(Instruction::decode_by(0xA9));
             cpu.writ_byte(0x0001, 0x10);
 
-            prepare_operands(&mut cpu);
+            load_operand_curr_i(&mut cpu);
 
             assert_eq!(cpu.pc(), 0x02);
             let i = cpu.i.unwrap();
@@ -1504,13 +1589,72 @@ mod m6502_addressing_modes {
             cpu.writ_byte(0x0001, 0x10);
             cpu.writ_byte(0x0002, 0x11);
 
-            prepare_operands(&mut cpu);
+            load_operand_curr_i(&mut cpu);
 
             assert_eq!(cpu.pc(), 0x03);
             let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0x1110);
         }
+
+        #[test]
+        fn test__prepare_operands_zero_custom_i() {
+            let mut cpu = setup(0xFEBE, true, 0xA9, Some(0x10));
+            cpu.writ_byte(0x09FF, 0xDD);
+            cpu.writ_byte(0x1001, 0xEE);
+            cpu.writ_byte(0x1002, 0xFF);
+            let mut i = Instruction::decode_by(0x08);
+            load_operand(&mut cpu, &mut i, 0x1000);
+
+            assert_eq!(cpu.pc(), 0xFEBE);
+            assert_eq!(cpu.i, Some(Instruction::decode_by(0xA9)));
+            assert_eq!(i.operand, Some(0xBEEF));
+            assert_eq!(i.amode_output, NotExecuted);
+        }
+
+        #[test]
+        fn test__prepare_operands_one_custom_i_1() {
+            let mut cpu = setup(0xFEBE, true, 0x08, None);
+            cpu.writ_byte(0x1001, 0x10);
+            let mut i = Instruction::decode_by(0xA9);
+
+            load_operand(&mut cpu, &mut i, 0x1000);
+
+            assert_eq!(cpu.pc(), 0xFEBE);
+            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+            assert_eq!(i.operand, Some(0x10));
+            assert_eq!(i.amode_output, NotExecuted);
+        }
+
+        #[test]
+        fn test__prepare_operands_one_custom_i_2() {
+            let mut cpu = setup(0xFEBE, true, 0x08, None);
+            cpu.writ_byte(0x1001, 0x20);
+            let mut i = Instruction::decode_by(0x19);
+
+            load_operand(&mut cpu, &mut i, 0x1000);
+
+            assert_eq!(cpu.pc(), 0xFEBE);
+            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+            assert_eq!(i.operand, Some(0x20));
+            assert_eq!(i.amode_output, NotExecuted);
+        }
+
+        #[test]
+        fn test__prepare_operands_two_custom_i() {
+            let mut cpu = setup(0xFEBE, true, 0x08, None);
+            cpu.writ_byte(0x1001, 0x20);
+            cpu.writ_byte(0x1002, 0x40);
+            let mut i = Instruction::decode_by(0xCC);
+
+            load_operand(&mut cpu, &mut i, 0x1000);
+
+            assert_eq!(cpu.pc(), 0xFEBE);
+            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+            assert_eq!(i.operand, Some(0x4020));
+            assert_eq!(i.amode_output, NotExecuted);
+        }
+
     }
 }
 
@@ -1551,7 +1695,7 @@ impl Cpu {
 
     /// **disassemble()** - Given a beginning address, disassemble `limit` of bytes from memory
     /// matching them to Instruction instances.
-    fn disassemble(&self, begin: Address, limit: Address) -> Result<Vec<Instruction>, ()> {
+    pub fn disassemble(&mut self, begin: Address, limit: Address) -> Result<Vec<Instruction>, ()> {
         if self.bus_conn.is_none() {
             return Err(());
         }
@@ -1562,7 +1706,8 @@ impl Cpu {
         let mut address = begin;
         while address < end {
             let opcode = self.read_byte(address);
-            let i = Instruction::decode_by(opcode);
+            let mut i = Instruction::decode_by(opcode);
+            load_operand(self, &mut i, address);
             address += i.size;
             result.push(i);
         }
@@ -1729,7 +1874,7 @@ mod test {
         assert_eq!(i.time, 2);
         assert_eq!(i.size, 2);
         assert_eq!(i.fun as usize, bpl as usize);
-        assert_eq!(i.amode as usize, relative_am as usize);
+        assert_eq!(i.amode_fun as usize, relative_am as usize);
     }
 
     #[test]
