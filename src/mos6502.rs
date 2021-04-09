@@ -564,6 +564,7 @@ impl Display for AddressingMode {
     }
 }
 
+
 ///
 /// Instruction
 ///
@@ -616,13 +617,15 @@ impl Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         use AddressingMode::*;
 
-        /// TODO
-        let prefix = match self.amode {
-            Imm => "#",
-            Imp | Zp0 | Zpx | Zpy | Abs | Ind => "",
-            Abx | Iny | Inx | Rel | Aby => "???"
+        let details = match self.amode {
+            Imm => ("#", ""),
+            Imp | Zp0 | Abs | Rel => ("", ""),
+            Ind => ("(", ")"),
+            Abx | Zpx => ("", ", X"),
+            Aby | Zpy => ("", ", Y"),
+            Iny => ("(", "), Y"),
+            Inx => ("(", ", X)"),
         };
-        let suffix = "";
 
         let address = format!("{:#6x?}\t", self.loaded_from);
         let operand = match self.operand {
@@ -634,9 +637,9 @@ impl Display for Instruction {
         write!(f, "{}", format!("{address}{mnemonic}\t{prefix}{operand}{suffix}{addressing_mode}\n",
                 address=address,
                 mnemonic=self.mnemonic,
-                prefix=prefix,
+                prefix=details.0,
                 operand=operand,
-                suffix=suffix,
+                suffix=details.1,
                 addressing_mode=addressing_mode))
     }
 }
@@ -2134,7 +2137,7 @@ mod test {
     }
 
     #[test]
-    fn test_stringify_disassembly_hard() {
+    fn test_stringify_disassembly_implied_and_immediate_am_instructions() {
         let mut cpu = setup(0xFEBE, true, 0x08, None);
         cpu.writ_byte(0x1000, 0x00);
         cpu.writ_byte(0x1001, 0xA9);
@@ -2145,6 +2148,117 @@ mod test {
         let expected_str = String::from("\
                 0x1000\tbrk\t\t| Imp\n\
                 0x1001\tlda\t#0x10\t| Imm\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_zero_page_and_absolute() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x6D);
+        cpu.writ_byte(0x1001, 0xAA);
+        cpu.writ_byte(0x1002, 0xBB);
+        cpu.writ_byte(0x1003, 0x65);
+        cpu.writ_byte(0x1004, 0x30);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
+
+        let expected_str = String::from("\
+                0x1000\tadc\t0xbbaa\t| Abs\n\
+                0x1003\tadc\t0x30\t| Zp0\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_zero_page_and_absolute_offset_x() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x7D);
+        cpu.writ_byte(0x1001, 0xAA);
+        cpu.writ_byte(0x1002, 0xBB);
+        cpu.writ_byte(0x1003, 0x75);
+        cpu.writ_byte(0x1004, 0x30);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
+
+        let expected_str = String::from("\
+                0x1000\tadc\t0xbbaa, X\t| Abx\n\
+                0x1003\tadc\t0x30, X\t| Zpx\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_zero_page_and_absolute_offset_y() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0xB9);
+        cpu.writ_byte(0x1001, 0xAA);
+        cpu.writ_byte(0x1002, 0xBB);
+        cpu.writ_byte(0x1003, 0xB6);
+        cpu.writ_byte(0x1004, 0x30);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
+
+        let expected_str = String::from("\
+                0x1000\tlda\t0xbbaa, Y\t| Aby\n\
+                0x1003\tldx\t0x30, Y\t| Zpy\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_indirect() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x6C);
+        cpu.writ_byte(0x1001, 0xAA);
+        cpu.writ_byte(0x1002, 0xBB);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
+
+        let expected_str = String::from("\
+                0x1000\tjmp\t(0xbbaa)\t| Ind\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_relative() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x90);
+        cpu.writ_byte(0x1001, 0x80);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
+
+        let expected_str = String::from("\
+                0x1000\tbcc\t0x80\t| Rel\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_indirect_offset_y() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x91);
+        cpu.writ_byte(0x1001, 0x10);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
+
+        let expected_str = String::from("\
+                0x1000\tsta\t(0x10), Y\t| Iny\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringidy_disassembly_indirect_offset_x() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x81);
+        cpu.writ_byte(0x1001, 0x10);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
+
+        let expected_str = String::from("\
+                0x1000\tsta\t(0x10, X)\t| Inx\n\
         ");
         assert_eq!(str_res.ok(), Some(expected_str));
     }
