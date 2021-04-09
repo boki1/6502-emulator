@@ -1,13 +1,14 @@
+use std::fmt::Display;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
-use std::fmt::Debug;
+use std::{fmt, fmt::Debug};
 use std::fs::File;
 use std::rc::Rc;
 use std::{io, io::prelude::*};
-use crate::mos6502::m6502_intruction_set::sta;
+use crate::mos6502::m6502_intruction_set::*;
 use std::ops::Add;
 use crate::mos6502::InterruptKind::Irq;
-use crate::mos6502::m6502_addressing_modes::load_operand;
+use crate::mos6502::m6502_addressing_modes as other_m6502_addressing_modes;
 
 pub type Address = u16;
 pub type Word = u16;
@@ -295,8 +296,6 @@ impl Cpu {
     /// skipped/wasted after each actual instruction
     /// execution.
     fn clock_cycle(&mut self) {
-        use m6502_addressing_modes::load_operand_curr_i;
-
         if self.time.residual() == 0 {
             let opcode = self.fetch();
 
@@ -559,6 +558,12 @@ pub enum AddressingMode {
     Rel,
 }
 
+impl Display for AddressingMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
 ///
 /// Instruction
 ///
@@ -606,23 +611,33 @@ pub struct Instruction {
     loaded_from: Address,
 }
 
-impl ToString for Instruction {
-    fn to_string(&self) -> String {
-        if self.operand.is_none() {
-            return "Bad instruction -- no operand".to_string();
-        }
+impl Display for Instruction {
 
-        // prefix -> #, $
-        let operand_prefix = String::new();
-        // suffix -> X, Y, etc.
-        let operand_suffix = String::new();
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
+        use AddressingMode::*;
 
-        format!("{:#06x}:    {}{}{}",
-                self.loaded_from,
-                operand_prefix,
-                self.mnemonic.to_uppercase(),
-                operand_suffix
-        )
+        /// TODO
+        let prefix = match self.amode {
+            Imm => "#",
+            Imp | Zp0 | Zpx | Zpy | Abs | Ind => "",
+            Abx | Iny | Inx | Rel | Aby => "???"
+        };
+        let suffix = "";
+
+        let address = format!("{:#6x?}\t", self.loaded_from);
+        let operand = match self.operand {
+            Some(num) => format!("{:#4x?}", num),
+            None => String::new(),
+        };
+        let addressing_mode = format!("\t| {}", self.amode);
+
+        write!(f, "{}", format!("{address}{mnemonic}\t{prefix}{operand}{suffix}{addressing_mode}\n",
+                address=address,
+                mnemonic=self.mnemonic,
+                prefix=prefix,
+                operand=operand,
+                suffix=suffix,
+                addressing_mode=addressing_mode))
     }
 }
 
@@ -1020,71 +1035,6 @@ mod m6502_addressing_modes {
         };
     }
 
-    /// **load_operand_curr_i()** - This is called right before
-    /// the addressing mode specifics are executed in order
-    /// to fetch the required operand into the operand
-    /// field in `i`.
-    pub fn load_operand_curr_i(cpu: &mut Cpu) {
-        use super::AddressingMode::*;
-
-        if cpu.i.is_none() {
-            return;
-        }
-
-        // The instruction is already loaded since we are looking at it
-        // The reason we are updating this value here and not beforehand
-        // is sa that a support could be provided for `load_operand()`
-        // also a.k.a so that we can load operands for instructions 
-        // which are not the current one whici is being executed.
-        let loaded_from: Address = cpu.pc() - 1;
-
-        let num_fetched = match cpu.i.as_ref().unwrap().amode {
-            Imp => 0,
-            Imm | Zp0 | Zpx | Zpy | Inx | Iny | Rel => 1,
-            Abs | Abx | Aby | Ind => 2,
-        };
-
-        let operand: Word = match num_fetched {
-            0 => 0xBEEF,
-            1 => Word::from(cpu.fetch()),
-            2 => {
-                let lo = cpu.fetch();
-                let hi = cpu.fetch();
-                Word::from_le_bytes([lo, hi])
-            }
-            _ => unreachable!("Unknown number of bytes for operand"),
-        };
-
-        let i = cpu.i.as_mut().unwrap();
-        i.loaded_from = loaded_from;
-        i.operand.replace(operand);
-    }
-
-
-    /// **load_operand()** - For any given instruction (only the addressing mode
-    /// is actually of importance here, fetch any operands that the instruction
-    /// requires taking into account that the address of the instruction in memory
-    /// is also provided.
-    pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
-        // Store previous state
-        let saved_pc = cpu.pc();
-        // The instruction has already been fetched
-        // so if address is where the instruction is
-        // then address + 1 is where the operand is.
-        *cpu.regset_mut().prog_counter_mut() = address.wrapping_add(1);
-
-        let saved_i = cpu.i.clone();
-        cpu.i.replace(i.clone());
-
-        load_operand_curr_i(cpu);
-
-        i.clone_from(&cpu.i.as_ref().unwrap());
-
-        // Restore previous state
-        cpu.i.clone_from(&saved_i);
-        *cpu.regset_mut().prog_counter_mut() = saved_pc;
-    }
-
     ///
     /// All addressing mode functions **require** that
     /// the cpu has loaded a value for `current_instruction`
@@ -1365,7 +1315,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__implied_am() {
+        fn test_implied_am() {
             let mut cpu = setup(0x0000, false, 0x08, None);
             cpu.regset_mut().set_accumulator(0x1A);
 
@@ -1376,7 +1326,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__immediate_am() {
+        fn test_immediate_am() {
             let mut cpu = setup(0x0000, true, 0xA9, Some(0x10));
             cpu.writ_byte(0xFA, 0x10);
 
@@ -1387,7 +1337,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__zeropage_am() {
+        fn test_zeropage_am() {
             let mut cpu = setup(0x0000, true, 0x25, Some(0x35));
             cpu.writ_byte(0x35, 0x10);
 
@@ -1397,7 +1347,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__zeropage_x_offset_am() {
+        fn test_zeropage_x_offset_am() {
             let mut cpu = setup(0x00, true, 0x35, Some(0x35));
             *cpu.regset_mut().x_index_mut() = 3;
             cpu.writ_byte(0x35 + 3, 0x10);
@@ -1408,7 +1358,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__zeropage_offset_wrapping_am() {
+        fn test_zeropage_offset_wrapping_am() {
             let mut cpu = setup(0x00, true, 0x35, Some(0x35));
             *cpu.regset_mut().y_index_mut() = 0xff;
             cpu.writ_byte(0x35 - 1, 0x10);
@@ -1419,7 +1369,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__absolute_am() {
+        fn test_absolute_am() {
             let mut cpu = setup(0x00, true, 0x2D, Some(0x0210));
             cpu.writ_byte(0x0210, 0x10);
 
@@ -1429,7 +1379,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__absolute_offset_am() {
+        fn test_absolute_offset_am() {
             let mut cpu = setup(0x00, true, 0x3D, Some(0x0210));
             *cpu.regset_mut().y_index_mut() = 0xA;
             cpu.writ_byte(0x0210 + 0xA, 0x10);
@@ -1440,7 +1390,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__relative_am_w_positive_number() {
+        fn test_relative_am_w_positive_number() {
             let mut cpu = setup(0x00, true, 0x30, Some(0x10));
             cpu.writ_byte(0x10, 0x10);
 
@@ -1450,7 +1400,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__relative_am_w_negative_number() {
+        fn test_relative_am_w_negative_number() {
             let mut cpu = setup(0x90, true, 0x30, Some(0x80));
             cpu.writ_byte(0x10, 0x10);
 
@@ -1460,7 +1410,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_am_page_cross() {
+        fn test_indirect_am_page_cross() {
             let mut cpu = setup(0x00, true, 0x6C, Some(0x1011));
             cpu.writ_byte(0x1011, 0x01);
             cpu.writ_byte(0x1012, 0xFF);
@@ -1471,7 +1421,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_am() {
+        fn test_indirect_am() {
             let mut cpu = setup(0x00, true, 0x6C, Some(0x10FF));
             cpu.writ_byte(0x10FF, 0x01);
             cpu.writ_byte(0x1000, 0xA7);
@@ -1482,7 +1432,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_xoffset_am_1() {
+        fn test_indirect_xoffset_am_1() {
             let mut cpu = setup(0x00, true, 0x21, Some(0x20));
             *cpu.regset_mut().x_index_mut() = 0x04;
             cpu.writ_byte(0x24, 0x74);
@@ -1495,7 +1445,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_xoffset_am_2() {
+        fn test_indirect_xoffset_am_2() {
             let mut cpu = setup(0x00, true, 0x21, Some(0x25));
             *cpu.regset_mut().x_index_mut() = 0x10;
             cpu.writ_byte(0x35, 0x01);
@@ -1508,7 +1458,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_xoffset_am_3() {
+        fn test_indirect_xoffset_am_3() {
             let mut cpu = setup(0x00, true, 0x21, Some(0xFE));
             *cpu.regset_mut().x_index_mut() = 0x01;
             cpu.writ_byte(0x0000, 0xFE);
@@ -1521,7 +1471,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_yoffset_am_1() {
+        fn test_indirect_yoffset_am_1() {
             let mut cpu = setup(0x00, true, 0x31, Some(0x25));
             *cpu.regset_mut().y_index_mut() = 0x10;
             cpu.writ_byte(0x0025, 0xFF);
@@ -1536,7 +1486,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_yoffset_am_2() {
+        fn test_indirect_yoffset_am_2() {
             let mut cpu = setup(0x00, true, 0x31, Some(0x25));
             *cpu.regset_mut().y_index_mut() = 0x10;
             cpu.writ_byte(0x0025, 0x01);
@@ -1551,7 +1501,7 @@ mod m6502_addressing_modes {
         }
 
         #[test]
-        fn test__indirect_yoffset_am_3() {
+        fn test_indirect_yoffset_am_3() {
             let mut cpu = setup(0x00, true, 0x31, Some(0x86));
             *cpu.regset_mut().y_index_mut() = 0x10;
             cpu.writ_byte(0x0086, 0x28);
@@ -1565,110 +1515,6 @@ mod m6502_addressing_modes {
             assert_eq!(marked_extra_cycle, false);
         }
 
-        #[test]
-        fn test__prepare_operands_zero() {
-            let mut cpu = setup(0x0001, true, 0x00, None);
-            cpu.i = Some(Instruction::decode_by(0x08));
-
-            load_operand_curr_i(&mut cpu);
-
-            let i = cpu.i.unwrap();
-            assert_eq!(i.operand.is_some(), true);
-            assert_eq!(i.operand.unwrap(), 0xBEEF);
-            assert_eq!(i.loaded_from, 0x0);
-        }
-
-        #[test]
-        fn test__prepare_operands_one() {
-            let mut cpu = setup(0x001, true, 0x00, None);
-            cpu.i = Some(Instruction::decode_by(0xA9));
-            cpu.writ_byte(0x0001, 0x10);
-
-            load_operand_curr_i(&mut cpu);
-
-            assert_eq!(cpu.pc(), 0x02);
-            let i = cpu.i.unwrap();
-            assert_eq!(i.operand.is_some(), true);
-            assert_eq!(i.operand.unwrap(), 0x10);
-            assert_eq!(i.loaded_from, 0x0);
-        }
-
-        #[test]
-        fn test__prepare_operands_two() {
-            let mut cpu = setup(0x001, true, 0x00, None);
-            cpu.i = Some(Instruction::decode_by(0xAD));
-            cpu.writ_byte(0x1, 0x10);
-            cpu.writ_byte(0x2, 0x11);
-
-            load_operand_curr_i(&mut cpu);
-
-            assert_eq!(cpu.pc(), 0x03);
-            let i = cpu.i.unwrap();
-            assert_eq!(i.operand.is_some(), true);
-            assert_eq!(i.operand.unwrap(), 0x1110);
-            assert_eq!(i.loaded_from, 0x0);
-        }
-
-        #[test]
-        fn test__prepare_operands_zero_custom_i() {
-            let mut cpu = setup(0xFEBE, true, 0xA9, Some(0x10));
-            cpu.writ_byte(0x1002, 0xEE);
-            cpu.writ_byte(0x1003, 0xFF);
-            let mut i = Instruction::decode_by(0x08);
-            load_operand(&mut cpu, &mut i, 0x1001);
-
-            assert_eq!(cpu.pc(), 0xFEBE);
-            assert_eq!(cpu.i, Some(Instruction::decode_by(0xA9)));
-            assert_eq!(i.operand, Some(0xBEEF));
-            assert_eq!(i.amode_output, NotExecuted);
-            assert_eq!(i.loaded_from, 0x1001);
-        }
-
-        #[test]
-        fn test__prepare_operands_one_custom_i_1() {
-            let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1002, 0x10);
-            let mut i = Instruction::decode_by(0xA9);
-
-            load_operand(&mut cpu, &mut i, 0x1001);
-
-            assert_eq!(cpu.pc(), 0xFEBE);
-            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
-            assert_eq!(i.operand, Some(0x10));
-            assert_eq!(i.amode_output, NotExecuted);
-            assert_eq!(i.loaded_from, 0x1001);
-        }
-
-        #[test]
-        fn test__prepare_operands_one_custom_i_2() {
-            let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1002, 0x20);
-            let mut i = Instruction::decode_by(0x19);
-
-            load_operand(&mut cpu, &mut i, 0x1001);
-
-            assert_eq!(cpu.pc(), 0xFEBE);
-            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
-            assert_eq!(i.operand, Some(0x20));
-            assert_eq!(i.amode_output, NotExecuted);
-            assert_eq!(i.loaded_from, 0x1001);
-        }
-
-        #[test]
-        fn test__prepare_operands_two_custom_i() {
-            let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1002, 0x20);
-            cpu.writ_byte(0x1003, 0x40);
-            let mut i = Instruction::decode_by(0xCC);
-
-            load_operand(&mut cpu, &mut i, 0x1001);
-
-            assert_eq!(cpu.pc(), 0xFEBE);
-            assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
-            assert_eq!(i.operand, Some(0x4020));
-            assert_eq!(i.amode_output, NotExecuted);
-            assert_eq!(i.loaded_from, 0x1001);
-        }
 
     }
 }
@@ -1704,9 +1550,19 @@ impl Asm {
         }
     }
 
-    pub fn stringify(&self) -> Result<String, ()> {
-        for i in self.code.iter() {
+    pub fn stringify_range(cpu: &mut Cpu, begin_address: Address, limit: u16) -> Result<String, ()> {
+        let asm = Asm::from_addr_range(cpu, begin_address, limit);
+        asm.stringify(true, true)
+    }
 
+    pub fn stringify(&self, address_column: bool, addressing_mode: bool) -> Result<String, ()> {
+        let mut res = String::new();
+        for i in self.code.iter() {
+            res += &i.to_string();
+        }
+
+        if res.len() > 0 {
+            return Ok(res);
         }
 
         Err(())
@@ -1811,18 +1667,87 @@ impl Cpu {
     }
 }
 
+
+/// **load_operand_curr_i()** - This is called right before
+/// the addressing mode specifics are executed in order
+/// to fetch the required operand into the operand
+/// field in `i`.
+pub fn load_operand_curr_i(cpu: &mut Cpu) {
+    use AddressingMode::*;
+
+    if cpu.i.is_none() {
+        return;
+    }
+
+    // The instruction is already loaded since we are looking at it
+    // The reason we are updating this value here and not beforehand
+    // is sa that a support could be provided for `load_operand()`
+    // also a.k.a so that we can load operands for instructions 
+    // which are not the current one whici is being executed.
+    let loaded_from: Address = cpu.pc() - 1;
+
+    let num_fetched = match cpu.i.as_ref().unwrap().amode {
+        Imp => 0,
+        Imm | Zp0 | Zpx | Zpy | Inx | Iny | Rel => 1,
+        Abs | Abx | Aby | Ind => 2,
+    };
+
+    let operand = match num_fetched {
+        0 => None,
+        1 => Some(Word::from(cpu.fetch())),
+        2 => {
+            let lo = cpu.fetch();
+            let hi = cpu.fetch();
+            Some(Word::from_le_bytes([lo, hi]))
+        }
+        _ => unreachable!("Unknown number of bytes for operand"),
+    };
+
+    let i = cpu.i.as_mut().unwrap();
+    i.loaded_from = loaded_from;
+    i.operand = operand;
+}
+
+
+/// **load_operand()** - For any given instruction (only the addressing mode
+/// is actually of importance here, fetch any operands that the instruction
+/// requires taking into account that the address of the instruction in memory
+/// is also provided.
+pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
+    // Store previous state
+    let saved_pc = cpu.pc();
+    // The instruction has already been fetched
+    // so if address is where the instruction is
+    // then address + 1 is where the operand is.
+    *cpu.regset_mut().prog_counter_mut() = address.wrapping_add(1);
+
+    let saved_i = cpu.i.clone();
+    cpu.i.replace(i.clone());
+
+    load_operand_curr_i(cpu);
+
+    i.clone_from(&cpu.i.as_ref().unwrap());
+
+    // Restore previous state
+    cpu.i.clone_from(&saved_i);
+    *cpu.regset_mut().prog_counter_mut() = saved_pc;
+}
+
+
+
 #[cfg(test)]
 mod test {
     use super::*;
+    use super::AddressingOutput::*;
 
     #[test]
-    fn test__create_cpu() {
+    fn test_create_cpu() {
         let _ = Cpu::new();
         assert!(true);
     }
 
     #[test]
-    fn test__getters_fields() {
+    fn test_getters_fields() {
         let mut regset = RegisterSet::new();
         assert_eq!(regset.accumulator(), 0);
         assert_eq!(regset.stk_ptr(), 0xfd);
@@ -1831,7 +1756,7 @@ mod test {
     }
 
     #[test]
-    fn test__getters_and_setters_bits() {
+    fn test_getters_and_setters_bits() {
         let mut regset = RegisterSet::default();
         let carry_is_set: bool = regset.carry();
         assert_eq!(carry_is_set, false);
@@ -1842,13 +1767,13 @@ mod test {
     }
 
     #[test]
-    fn test__create_bus() {
+    fn test_create_bus() {
         let bus = MainBus::new();
         assert_eq!(bus.mem[0], 0x0);
     }
 
     #[test]
-    fn test__cpu_with_host() {
+    fn test_cpu_with_host() {
         let mut bus = MainBus::new();
         bus.write(1, 10);
         let mut cpu = Cpu::new();
@@ -1861,7 +1786,7 @@ mod test {
     }
 
     #[test]
-    fn test__stk_operations() {
+    fn test_stk_operations() {
         let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
 
         cpu.stk_push(0xcd);
@@ -1874,7 +1799,7 @@ mod test {
     }
 
     #[test]
-    fn test__stk_operations_double() {
+    fn test_stk_operations_double() {
         let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
         let data: Word = 0xabcd;
         cpu.stk_doublepush(data);
@@ -1890,7 +1815,7 @@ mod test {
     }
 
     #[test]
-    fn test__reset_cpu() {
+    fn test_reset_cpu() {
         let mut cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
         cpu.reset();
 
@@ -1904,7 +1829,7 @@ mod test {
     }
 
     #[test]
-    fn test__read_seq_from_host() {
+    fn test_read_seq_from_host() {
         let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
         let result = cpu.read_some(0x000, 0x7ff);
         let expected_result = vec![0x00; 0x7ff];
@@ -1912,7 +1837,7 @@ mod test {
     }
 
     #[test]
-    fn test__decode_by_correct() {
+    fn test_decode_by_correct() {
         use super::m6502_addressing_modes::relative_am;
         use super::m6502_intruction_set::bpl;
 
@@ -1927,7 +1852,7 @@ mod test {
     }
 
     #[test]
-    fn test__load_program() {
+    fn test_load_program() {
         let mut cpu = Cpu::new_custompc(0x1000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
@@ -1965,7 +1890,7 @@ mod test {
     }
 
     #[test]
-    fn test__load_program_and_disassemble() {
+    fn test_load_program_and_disassemble() {
         let mut cpu = Cpu::new_custompc(0x1000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         let prog: Vec<Byte> = vec![162, 10, 142, 0, 0, 162, 3];
@@ -1983,7 +1908,7 @@ mod test {
     }
 
     #[test]
-    fn test__load_binary_file_program() {
+    fn test_load_binary_file_program() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
@@ -2003,7 +1928,7 @@ mod test {
     }
 
     #[test]
-    fn test__single_clock_cycle() {
+    fn test_single_clock_cycle() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
@@ -2017,7 +1942,7 @@ mod test {
     }
 
     #[test]
-    fn test__handle_irq_correct() {
+    fn test_handle_irq_correct() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         cpu.writ_byte(0xFFFE, 0x00);
@@ -2039,7 +1964,7 @@ mod test {
     }
 
     #[test]
-    fn test__handle_irq_incorrect() {
+    fn test_handle_irq_incorrect() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         cpu.writ_byte(0xFFFE, 0x00);
@@ -2057,7 +1982,7 @@ mod test {
     }
 
     #[test]
-    fn test__handle_nmi() {
+    fn test_handle_nmi() {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         cpu.writ_byte(0xFFFA, 0x00);
@@ -2077,4 +2002,151 @@ mod test {
         assert_eq!(cpu.pc(), 0x2002);
         assert_eq!(cpu.regset.irq_disabled(), true);
     }
+
+    fn setup(custom_pc: Word, connect: bool, opcode: Opcode, operand: Option<Word>) -> Cpu {
+            let mut cpu = Cpu::new_custompc(custom_pc);
+
+            cpu.i = Some(Instruction::decode_by(opcode));
+            cpu.i.as_mut().unwrap().operand = operand;
+
+            if connect {
+                cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            }
+
+            cpu
+        }
+
+    #[test]
+    fn test_prepare_operands_zero() {
+        let mut cpu = setup(0x0001, true, 0x00, None);
+        cpu.i = Some(Instruction::decode_by(0x08));
+
+        load_operand_curr_i(&mut cpu);
+
+        let i = cpu.i.unwrap();
+        assert_eq!(i.operand, None);
+        assert_eq!(i.loaded_from, 0x0);
+    }
+
+    #[test]
+    fn test_prepare_operands_one() {
+        let mut cpu = setup(0x001, true, 0x00, None);
+        cpu.i = Some(Instruction::decode_by(0xA9));
+        cpu.writ_byte(0x0001, 0x10);
+
+        load_operand_curr_i(&mut cpu);
+
+        assert_eq!(cpu.pc(), 0x02);
+        let i = cpu.i.unwrap();
+        assert_eq!(i.operand.is_some(), true);
+        assert_eq!(i.operand.unwrap(), 0x10);
+        assert_eq!(i.loaded_from, 0x0);
+    }
+
+    #[test]
+    fn test_prepare_operands_two() {
+        let mut cpu = setup(0x001, true, 0x00, None);
+        cpu.i = Some(Instruction::decode_by(0xAD));
+        cpu.writ_byte(0x1, 0x10);
+        cpu.writ_byte(0x2, 0x11);
+
+        load_operand_curr_i(&mut cpu);
+
+        assert_eq!(cpu.pc(), 0x03);
+        let i = cpu.i.unwrap();
+        assert_eq!(i.operand.is_some(), true);
+        assert_eq!(i.operand.unwrap(), 0x1110);
+        assert_eq!(i.loaded_from, 0x0);
+    }
+
+    #[test]
+    fn test_prepare_operands_zero_custom_i() {
+        let mut cpu = setup(0xFEBE, true, 0xA9, Some(0x10));
+        cpu.writ_byte(0x1002, 0xEE);
+        cpu.writ_byte(0x1003, 0xFF);
+        let mut i = Instruction::decode_by(0x08);
+        load_operand(&mut cpu, &mut i, 0x1001);
+
+        assert_eq!(cpu.pc(), 0xFEBE);
+        assert_eq!(cpu.i, Some(Instruction::decode_by(0xA9)));
+        assert_eq!(i.operand, None);
+        assert_eq!(i.amode_output, NotExecuted);
+        assert_eq!(i.loaded_from, 0x1001);
+    }
+
+    #[test]
+    fn test_prepare_operands_one_custom_i_1() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1002, 0x10);
+        let mut i = Instruction::decode_by(0xA9);
+
+        load_operand(&mut cpu, &mut i, 0x1001);
+
+        assert_eq!(cpu.pc(), 0xFEBE);
+        assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+        assert_eq!(i.operand, Some(0x10));
+        assert_eq!(i.amode_output, NotExecuted);
+        assert_eq!(i.loaded_from, 0x1001);
+    }
+
+    #[test]
+    fn test_prepare_operands_one_custom_i_2() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1002, 0x20);
+        let mut i = Instruction::decode_by(0x19);
+
+        load_operand(&mut cpu, &mut i, 0x1001);
+
+        assert_eq!(cpu.pc(), 0xFEBE);
+        assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+        assert_eq!(i.operand, Some(0x20));
+        assert_eq!(i.amode_output, NotExecuted);
+        assert_eq!(i.loaded_from, 0x1001);
+    }
+
+    #[test]
+    fn test_prepare_operands_two_custom_i() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1002, 0x20);
+        cpu.writ_byte(0x1003, 0x40);
+        let mut i = Instruction::decode_by(0xCC);
+
+        load_operand(&mut cpu, &mut i, 0x1001);
+
+        assert_eq!(cpu.pc(), 0xFEBE);
+        assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
+        assert_eq!(i.operand, Some(0x4020));
+        assert_eq!(i.amode_output, NotExecuted);
+        assert_eq!(i.loaded_from, 0x1001);
+    }
+
+    #[test]
+    fn test_stringify_disassembly() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x00);
+        cpu.writ_byte(0x1001, 0xA9);
+        cpu.writ_byte(0x1002, 0x10);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
+
+        let expected_str = String::from("0x1000\tbrk\t\t| Imp\n");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
+    #[test]
+    fn test_stringify_disassembly_hard() {
+        let mut cpu = setup(0xFEBE, true, 0x08, None);
+        cpu.writ_byte(0x1000, 0x00);
+        cpu.writ_byte(0x1001, 0xA9);
+        cpu.writ_byte(0x1002, 0x10);
+
+        let str_res = Asm::stringify_range(&mut cpu, 0x1000, 2);
+
+        let expected_str = String::from("\
+                0x1000\tbrk\t\t| Imp\n\
+                0x1001\tlda\t#0x10\t| Imm\n\
+        ");
+        assert_eq!(str_res.ok(), Some(expected_str));
+    }
+
 }
