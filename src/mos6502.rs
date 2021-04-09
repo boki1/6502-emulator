@@ -521,7 +521,7 @@ macro_rules! make_instr {
             size: $p_size,
             amode_output: AddressingOutput::NotExecuted,
             operand: None,
-            loaded_at: 0x0000,
+            loaded_from: 0x0000,
         }
     };
 }
@@ -599,11 +599,11 @@ pub struct Instruction {
     /// It is modified **only from the function `amode`.
     amode_output: AddressingOutput,
 
-    /// **loaded_at** - The address where the first byte of this
+    /// **loaded_from** - The address where the first byte of this
     /// instruction is located in memory
     ///
     /// Unused in the current implementation.
-    loaded_at: Address,
+    loaded_from: Address,
 }
 
 impl ToString for Instruction {
@@ -618,7 +618,7 @@ impl ToString for Instruction {
         let operand_suffix = String::new();
 
         format!("{:#06x}:    {}{}{}",
-                self.loaded_at,
+                self.loaded_from,
                 operand_prefix,
                 self.mnemonic.to_uppercase(),
                 operand_suffix
@@ -657,7 +657,7 @@ impl Clone for Instruction {
             size: self.size,
             operand: self.operand.clone(),
             amode_output: self.amode_output,
-            loaded_at: self.loaded_at
+            loaded_from: self.loaded_from
         }
     }
 }
@@ -1031,6 +1031,13 @@ mod m6502_addressing_modes {
             return;
         }
 
+        // The instruction is already loaded since we are looking at it
+        // The reason we are updating this value here and not beforehand
+        // is sa that a support could be provided for `load_operand()`
+        // also a.k.a so that we can load operands for instructions 
+        // which are not the current one whici is being executed.
+        let loaded_from: Address = cpu.pc() - 1;
+
         let num_fetched = match cpu.i.as_ref().unwrap().amode {
             Imp => 0,
             Imm | Zp0 | Zpx | Zpy | Inx | Iny | Rel => 1,
@@ -1048,7 +1055,9 @@ mod m6502_addressing_modes {
             _ => unreachable!("Unknown number of bytes for operand"),
         };
 
-        cpu.i.as_mut().unwrap().operand.replace(operand);
+        let i = cpu.i.as_mut().unwrap();
+        i.loaded_from = loaded_from;
+        i.operand.replace(operand);
     }
 
 
@@ -1558,7 +1567,7 @@ mod m6502_addressing_modes {
 
         #[test]
         fn test__prepare_operands_zero() {
-            let mut cpu = setup(0x0000, true, 0x00, None);
+            let mut cpu = setup(0x0001, true, 0x00, None);
             cpu.i = Some(Instruction::decode_by(0x08));
 
             load_operand_curr_i(&mut cpu);
@@ -1566,6 +1575,7 @@ mod m6502_addressing_modes {
             let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0xBEEF);
+            assert_eq!(i.loaded_from, 0x0);
         }
 
         #[test]
@@ -1580,14 +1590,15 @@ mod m6502_addressing_modes {
             let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0x10);
+            assert_eq!(i.loaded_from, 0x0);
         }
 
         #[test]
         fn test__prepare_operands_two() {
             let mut cpu = setup(0x001, true, 0x00, None);
             cpu.i = Some(Instruction::decode_by(0xAD));
-            cpu.writ_byte(0x0001, 0x10);
-            cpu.writ_byte(0x0002, 0x11);
+            cpu.writ_byte(0x1, 0x10);
+            cpu.writ_byte(0x2, 0x11);
 
             load_operand_curr_i(&mut cpu);
 
@@ -1595,64 +1606,68 @@ mod m6502_addressing_modes {
             let i = cpu.i.unwrap();
             assert_eq!(i.operand.is_some(), true);
             assert_eq!(i.operand.unwrap(), 0x1110);
+            assert_eq!(i.loaded_from, 0x0);
         }
 
         #[test]
         fn test__prepare_operands_zero_custom_i() {
             let mut cpu = setup(0xFEBE, true, 0xA9, Some(0x10));
-            cpu.writ_byte(0x09FF, 0xDD);
-            cpu.writ_byte(0x1001, 0xEE);
-            cpu.writ_byte(0x1002, 0xFF);
+            cpu.writ_byte(0x1002, 0xEE);
+            cpu.writ_byte(0x1003, 0xFF);
             let mut i = Instruction::decode_by(0x08);
-            load_operand(&mut cpu, &mut i, 0x1000);
+            load_operand(&mut cpu, &mut i, 0x1001);
 
             assert_eq!(cpu.pc(), 0xFEBE);
             assert_eq!(cpu.i, Some(Instruction::decode_by(0xA9)));
             assert_eq!(i.operand, Some(0xBEEF));
             assert_eq!(i.amode_output, NotExecuted);
+            assert_eq!(i.loaded_from, 0x1001);
         }
 
         #[test]
         fn test__prepare_operands_one_custom_i_1() {
             let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1001, 0x10);
+            cpu.writ_byte(0x1002, 0x10);
             let mut i = Instruction::decode_by(0xA9);
 
-            load_operand(&mut cpu, &mut i, 0x1000);
+            load_operand(&mut cpu, &mut i, 0x1001);
 
             assert_eq!(cpu.pc(), 0xFEBE);
             assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
             assert_eq!(i.operand, Some(0x10));
             assert_eq!(i.amode_output, NotExecuted);
+            assert_eq!(i.loaded_from, 0x1001);
         }
 
         #[test]
         fn test__prepare_operands_one_custom_i_2() {
             let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1001, 0x20);
+            cpu.writ_byte(0x1002, 0x20);
             let mut i = Instruction::decode_by(0x19);
 
-            load_operand(&mut cpu, &mut i, 0x1000);
+            load_operand(&mut cpu, &mut i, 0x1001);
 
             assert_eq!(cpu.pc(), 0xFEBE);
             assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
             assert_eq!(i.operand, Some(0x20));
             assert_eq!(i.amode_output, NotExecuted);
+            assert_eq!(i.loaded_from, 0x1001);
         }
 
         #[test]
         fn test__prepare_operands_two_custom_i() {
             let mut cpu = setup(0xFEBE, true, 0x08, None);
-            cpu.writ_byte(0x1001, 0x20);
-            cpu.writ_byte(0x1002, 0x40);
+            cpu.writ_byte(0x1002, 0x20);
+            cpu.writ_byte(0x1003, 0x40);
             let mut i = Instruction::decode_by(0xCC);
 
-            load_operand(&mut cpu, &mut i, 0x1000);
+            load_operand(&mut cpu, &mut i, 0x1001);
 
             assert_eq!(cpu.pc(), 0xFEBE);
             assert_eq!(cpu.i, Some(Instruction::decode_by(0x08)));
             assert_eq!(i.operand, Some(0x4020));
             assert_eq!(i.amode_output, NotExecuted);
+            assert_eq!(i.loaded_from, 0x1001);
         }
 
     }
@@ -1663,6 +1678,40 @@ mod m6502_addressing_modes {
 ///
 /// Some additional functions needed for the cpu
 ///
+
+#[derive(Debug, PartialEq)]
+pub struct Asm {
+    code: Vec<Instruction>,
+}
+
+impl Asm {
+    pub fn from_addr_range(cpu: &mut Cpu, begin_address: Address, limit: u16) -> Asm
+    {
+        let mut code: Vec<Instruction> = Vec::new();
+
+        let end_address = begin_address + limit;
+        let mut address = begin_address;
+        while address < end_address {
+            let opcode = cpu.read_byte(address);
+                let mut i = Instruction::decode_by(opcode);
+                load_operand(cpu, &mut i, address);
+                address += i.size;
+                code.push(i);
+        }
+
+        Asm {
+            code
+        }
+    }
+
+    pub fn stringify(&self) -> Result<String, ()> {
+        for i in self.code.iter() {
+
+        }
+
+        Err(())
+    }
+}
 
 const STACK_OFFSET: Address = 0x100;
 
@@ -1695,24 +1744,24 @@ impl Cpu {
 
     /// **disassemble()** - Given a beginning address, disassemble `limit` of bytes from memory
     /// matching them to Instruction instances.
-    pub fn disassemble(&mut self, begin: Address, limit: Address) -> Result<Vec<Instruction>, ()> {
+    pub fn disassemble(&mut self, begin: Address, limit: Address) -> Option<Asm> {
         if self.bus_conn.is_none() {
-            return Err(());
+            return None;
         }
 
-        let mut result: Vec<Instruction> = Vec::new();
-
-        let end = begin + limit;
-        let mut address = begin;
-        while address < end {
-            let opcode = self.read_byte(address);
-            let mut i = Instruction::decode_by(opcode);
-            load_operand(self, &mut i, address);
-            address += i.size;
-            result.push(i);
+        let asm = Asm::from_addr_range(self, begin, limit);
+        if asm.code.len() > 0 {
+            return Some(asm);
         }
 
-        Ok(result)
+        None
+    }
+
+    pub fn print_disassembly(&mut self, begin: Address, limit: Address) {
+        if let Some(disassembly) = self.disassemble(begin, limit) {
+            for i in disassembly.code.iter() {
+            } 
+        }
     }
 
     /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
@@ -1921,16 +1970,16 @@ mod test {
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         let prog: Vec<Byte> = vec![162, 10, 142, 0, 0, 162, 3];
         let old_pc = cpu.load_program(&prog, 0x8000, 7, true);
-        let expected_asm = vec![
-            Instruction::decode_by(162),
-            Instruction::decode_by(142),
-            Instruction::decode_by(162),
-        ];
+        let expected_asm = Asm {
+            code: vec![Instruction::decode_by(162),
+                        Instruction::decode_by(142),
+                        Instruction::decode_by(162),]
+        };
 
         let asm = cpu.disassemble(0x8000, 7);
 
         assert_eq!(old_pc, Ok(0x1000));
-        assert_eq!(asm.ok(), Some(expected_asm));
+        assert_eq!(asm, Some(expected_asm));
     }
 
     #[test]
@@ -1938,17 +1987,19 @@ mod test {
         let mut cpu = Cpu::new_custompc(0x0000);
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
-        let expected_asm = vec![
-            Instruction::decode_by(0xA9), // lda #$02
-            Instruction::decode_by(0x85), // eor  $02
-            Instruction::decode_by(0xA9), // lda #$04
-        ];
+        let expected_asm = Asm {
+            code:vec![
+                Instruction::decode_by(0xA9), 
+                Instruction::decode_by(0x85), 
+                Instruction::decode_by(0xA9), 
+            ]
+        };
 
         let old_pc = cpu.load_file("src/test.bin", 0x8000, true);
 
         let asm = cpu.disassemble(0x8000, 6);
         assert_eq!(old_pc, Ok(0x0000));
-        assert_eq!(asm.ok(), Some(expected_asm));
+        assert_eq!(asm, Some(expected_asm));
     }
 
     #[test]
