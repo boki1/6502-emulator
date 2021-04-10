@@ -915,7 +915,9 @@ impl Instruction {
 /// Legal MOS 6502 instructions
 ///
 mod m6502_intruction_set {
-    use super::{
+    use crate::mos6502::Byte;
+use crate::mos6502::RegisterSet;
+use super::{
         Address, AddressingMode::*, AddressingOutput::*, Cpu, CpuError, Instruction, MainBus,
         Opcode, Word,
     };
@@ -955,6 +957,14 @@ mod m6502_intruction_set {
 
         *cpu.time_mut().residual_mut() += cycles_inc;
         cpu.regset_mut().set_prog_counter(next_address);
+    }
+
+    fn do_compare(regs: &mut RegisterSet, lhs: Byte, rhs: Byte) {
+        let diff = lhs.wrapping_sub(rhs);
+
+        regs.set_carry(lhs >= rhs);
+        regs.set_zero(lhs == rhs);
+        regs.set_negative(diff & 0x80 > 0);
     }
 
     /// TODO:
@@ -1166,14 +1176,29 @@ mod m6502_intruction_set {
     }
 
     pub fn cmp(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+        let regs: &mut RegisterSet = cpu.regset_mut();
+
+        do_compare(regs, regs.accumulator(), fetched);
+
         Ok(())
     }
 
     pub fn cpx(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+        let regs: &mut RegisterSet = cpu.regset_mut();
+
+        do_compare(regs, regs.x_index(), fetched);
+
         Ok(())
     }
 
     pub fn cpy(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+        let regs = cpu.regset_mut();
+
+        do_compare(regs, regs.y_index(), fetched);
+
         Ok(())
     }
 
@@ -1771,6 +1796,7 @@ use super::*;
 
             set_amode_output(&mut cpu, ValueOnly(0x10));
             let res = lda(&mut cpu);
+            let regs = cpu.regset();
 
             assert_eq!(res.ok(), Some(()));
             assert_eq!(regs.accumulator(), 0x10);
@@ -1912,6 +1938,61 @@ use super::*;
             assert_eq!(read_value, 0x00);
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), true);
+        }
+        
+        #[test]
+        fn test_do_compare_greater_than() {
+            let mut regset = RegisterSet::default();
+            let lhs: Byte = 14;
+            let rhs: Byte = 12;
+
+            do_compare(&mut regset, lhs, rhs);
+
+            assert_eq!(regset.carry(), true);
+            assert_eq!(regset.negative(), false);
+            assert_eq!(regset.zero(), false);
+        }
+
+        #[test]
+        fn test_do_compare_equal() {
+            let mut regset = RegisterSet::default();
+            let lhs: Byte = 10;
+            let rhs: Byte = 10;
+
+            do_compare(&mut regset, lhs, rhs);
+
+            assert_eq!(regset.carry(), true);
+            assert_eq!(regset.negative(), false);
+            assert_eq!(regset.zero(), true);
+        }
+
+        #[test]
+        fn test_do_compare_less_than() {
+            let mut regset = RegisterSet::default();
+            let lhs: Byte = 1;
+            let rhs: Byte = 10;
+
+            do_compare(&mut regset, lhs, rhs);
+
+            assert_eq!(regset.carry(), false);
+            assert_eq!(regset.negative(), true);
+            assert_eq!(regset.zero(), false);
+        }
+
+        #[test]
+        fn test_cmp() {
+            let mut cpu = setup(0xFEBE, true, Some(0xD5), None);
+            cpu.regset_mut().set_accumulator(0x20);
+            set_amode_output(&mut cpu, Fetched { value: 0x14, address: 0xAE } );
+
+            let res = cmp(&mut cpu);
+
+            let regs = cpu.regset();
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.carry(), true);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
         }
 
     }
