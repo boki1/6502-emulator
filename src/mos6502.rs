@@ -912,7 +912,10 @@ impl Instruction {
 /// Legal MOS 6502 instructions
 ///
 mod m6502_intruction_set {
-    use super::{Word, Opcode, Cpu, Instruction, MainBus, CpuError, AddressingMode::*, AddressingOutput::*};
+    use super::{
+        Word, Opcode, Cpu, Instruction, MainBus, Address, 
+        CpuError, AddressingMode::*, AddressingOutput::*
+    };
 
     fn verify_and_fetch(cpu: &mut Cpu) -> Result<Word, CpuError> {
 
@@ -926,6 +929,27 @@ mod m6502_intruction_set {
         }
 
         Err(CpuError::CurrentInstructionMissing)
+    }
+
+    #[inline]
+    fn page_of(addr: Address) -> u8 {
+        ((addr & 0xff00) >> 8) as u8
+    }
+
+    
+    /// Performs the actual branch. Gets called by all 'Branch if ...'
+    /// instructions if their specific predicate is correct (??? is that the right word)
+    /// According to (this )[] website the following rules apply to all branching
+    /// instructions.
+    /// > Add 1 to cycles if branch occurs on same page.
+    /// > Add 2 to cycles if branch occurs to different page.
+    fn do_branch(cpu: &mut Cpu, next_address: Address) {
+       
+        let prog_counter = cpu.regset().prog_counter();
+        let cycles_inc = if page_of(next_address) == page_of(prog_counter) { 1 } else { 2 };
+
+        *cpu.time_mut().residual_mut() += cycles_inc;
+        cpu.regset_mut().set_prog_counter(next_address);
     }
 
     /// TODO:
@@ -997,25 +1021,97 @@ mod m6502_intruction_set {
         Ok(())
     }
 
-    pub fn bcc(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
+    pub fn bcc(cpu: &mut Cpu)  -> Result<(), CpuError> {
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
 
-    pub fn bcs(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
+        if !regs.carry() {
+            do_branch(cpu, next_address);
+        }
 
-    pub fn beq(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
+        Ok(()) 
+    }
+
+    pub fn bcs(cpu: &mut Cpu)  -> Result<(), CpuError> { 
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
+
+        if regs.carry() {
+            do_branch(cpu, next_address);
+        }
+
+        Ok(())
+    }
+
+    pub fn beq(cpu: &mut Cpu)  -> Result<(), CpuError> {
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
+
+        if regs.zero() {
+            do_branch(cpu, next_address);
+        }
+
+        Ok(()) 
+    }
 
     pub fn bit(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
 
-    pub fn bmi(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+    pub fn bmi(cpu: &mut Cpu) -> Result<(), CpuError> { 
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
 
-    pub fn bne(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+        if regs.negative() {
+            do_branch(cpu, next_address);
+        }
 
-    pub fn bpl(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+        Ok(())
+    }
+
+    pub fn bne(cpu: &mut Cpu) -> Result<(), CpuError> { 
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
+
+        if !regs.zero() {
+            do_branch(cpu, next_address);
+        }
+
+        Ok(())
+    }
+
+    pub fn bpl(cpu: &mut Cpu) -> Result<(), CpuError> { 
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
+
+        if !regs.negative() {
+            do_branch(cpu, next_address);
+        }
+
+        Ok(())
+    }
 
     pub fn brk(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn bvc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+    pub fn bvc(cpu: &mut Cpu) -> Result<(), CpuError> { 
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
 
-    pub fn bvs(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+        if !regs.overflowed() {
+            do_branch(cpu, next_address);
+        }
+        
+        Ok(())
+    }
+
+    pub fn bvs(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let next_address = verify_and_fetch(cpu)?;
+        let regs = cpu.regset();
+
+        if regs.overflowed() {
+            do_branch(cpu, next_address);
+        }
+
+        Ok(())
+    }
 
     pub fn clc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
@@ -1262,6 +1358,52 @@ mod m6502_intruction_set {
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), false);
             assert_eq!(regs.carry(), false);
+        }
+
+        #[test]
+        fn test_do_branch() {
+            let mut cpu = setup(0xFEBE, true, None, None);
+            *cpu.time_mut().residual_mut() = 0;
+
+            do_branch(&mut cpu, 0xFEBE + 10);
+            let regs = cpu.regset();
+            
+            assert_eq!(cpu.pc(), 0xFEBE + 10);
+            assert_eq!(cpu.time.residual(), 1);
+        }
+
+        #[test]
+        fn test_do_branch_negative() {
+            let mut cpu = setup(0xFEBE, true, None, None);
+            *cpu.time_mut().residual_mut() = 0;
+
+            do_branch(&mut cpu, 0xFEBE - 120);
+            let regs = cpu.regset();
+            
+            assert_eq!(cpu.pc(), 0xFEBE - 120);
+            assert_eq!(cpu.time.residual(), 1);
+        }
+
+        #[test]
+        fn test_do_branch_page_cross() {
+            let mut cpu = setup(0xFEFE, true, None, None);
+            *cpu.time_mut().residual_mut() = 0;
+
+            do_branch(&mut cpu, 0xFEFE + 10);
+            
+            assert_eq!(cpu.pc(), 0xFEFE + 10);
+            assert_eq!(cpu.time.residual(), 2);
+        }
+
+        #[test]
+        fn test_do_branch_negative_page_cross() {
+            let mut cpu = setup(0xFEFE + 10, true, None, None);
+            *cpu.time_mut().residual_mut() = 0;
+
+            do_branch(&mut cpu, 0xFEFE);
+            
+            assert_eq!(cpu.pc(), 0xFEFE);
+            assert_eq!(cpu.time.residual(), 2);
         }
     }
 }
