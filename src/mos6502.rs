@@ -212,12 +212,29 @@ pub struct Cpu {
     i: Option<Instruction>,
 }
 
+///
+/// CpuError
+/// \ 
+/// The enum describes the variation of errors which might occur during emulation.\
+/// \ 
+/// **BusInterfaceMissing** - The cpu has tried to read or write from its 
+/// associated memory but hasn't found one.\
+/// **CurrentInstructionMissing** - The cpu has tried to access the current
+/// intstruction field expecting to value correct value bot there has not
+/// been one.\
+/// **ExptectedOperandMissing** - An addressing mode which expects more than
+/// the given operands has been used.\
+/// **FailedLoadingProgram** - While reading the input file an error has occures.\
+/// **BadAddressing** - This error occures either when addressing or when addressing
+/// is exptected and it has not happened.
+/// 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CpuError {
     BusInterfaceMissing,
     CurrentInstructionMissing,
     ExpectedOperandMissing,
     FailedLoadingProgram,
+    BadAddressing,
 }
 
 impl Cpu {
@@ -895,23 +912,25 @@ impl Instruction {
 /// Legal MOS 6502 instructions
 ///
 mod m6502_intruction_set {
-    use super::{Word, Opcode, Cpu, Instruction, MainBus, CpuError, AddressingMode::*};
+    use super::{Word, Opcode, Cpu, Instruction, MainBus, CpuError, AddressingMode::*, AddressingOutput::*};
 
     fn verify_and_fetch(cpu: &mut Cpu) -> Result<Word, CpuError> {
 
         if let Some(i) = &cpu.i {
-            if let Some(operand) = &i.operand {
-                return Ok(*operand);
-            } else {
-                return Err(CpuError::ExpectedOperandMissing);
-            }
+            return match &i.amode_output {
+                Fetched{value, address} => Ok(Word::from(*value)),
+                ValueOnly(value) => Ok(Word::from(*value)),
+                AbsoluteAddress(address) => Ok(*address),
+                NotExecuted => Err(CpuError::BadAddressing),
+            };
         }
 
         Err(CpuError::CurrentInstructionMissing)
     }
 
-
     /// TODO:
+    /// Document
+
     /// adc - Add with carry
     /// 
     /// V <- ~(A^M) & A^(A+M+C)
@@ -961,8 +980,11 @@ mod m6502_intruction_set {
                     let _ = cpu.regset_mut().set_accumulator(lo);
                 },
                 _ => {
-                    let address = i.amode_output;
-                    cpu.writ_byte(0x0000, lo);
+                    if let Fetched{value: _, address} = i.amode_output {
+                        cpu.writ_byte(address, lo);
+                    } else {
+                        panic!("Bad addressing mode usage. Expected address as well as value.")
+                    }
                 }
             };
         }
@@ -1178,6 +1200,68 @@ mod m6502_intruction_set {
             assert_eq!(regs.zero(), false);
             assert_eq!(regs.negative(), true);
             assert_eq!(regs.overflowed(), true);
+        }
+
+        #[test]
+        fn test_and_zero() {
+            let mut cpu = setup(0x0000, true, Some(0x29), Some(0x0));
+            cpu.regset_mut().set_accumulator(0x07);
+
+            let res = and(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x00);
+            assert_eq!(regs.zero(), true);
+            assert_eq!(regs.negative(), false);
+        }
+
+        #[test]
+        fn test_and_negative() {
+            let mut cpu = setup(0x0000, true, Some(0x29), Some(0x80));
+            cpu.regset_mut().set_accumulator(0x95);
+
+            let res = and(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x80);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.negative(), true);
+        }
+
+        #[test]
+        fn test_asl_mem() {
+            let mut cpu = setup(0x0000, true, Some(0x06), Some(0xFF));
+            cpu.regset_mut().set_accumulator(0x00);
+            cpu.i.as_mut().unwrap().amode_output = Fetched{value: 0x4F, address: 0xFF};
+            cpu.writ_byte(0xFF, 0x4F);
+
+            let res = asl(&mut cpu);
+            let shifted = cpu.read_byte(0xFF);
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(shifted, 0x4F << 1);
+            let regs = cpu.regset();
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.carry(), false);
+        }
+
+        #[test]
+        fn test_asl_accumulator() {
+            let mut cpu = setup(0x0000, true, Some(0x0A), None);
+            cpu.regset_mut().set_accumulator(0x4);
+            cpu.i.as_mut().unwrap().amode_output = ValueOnly(0x4);
+
+            let res = asl(&mut cpu);
+            let regs = cpu.regset();
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.accumulator(), 0x8);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.carry(), false);
         }
     }
 }
