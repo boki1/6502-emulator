@@ -1214,14 +1214,38 @@ mod m6502_intruction_set {
     }
 
     pub fn lda(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+
+        let regs = cpu.regset_mut();
+        regs.set_accumulator(fetched);
+
+        regs.set_zero(fetched == 0);
+        regs.set_negative(fetched & 0x80 > 0);
+
         Ok(())
     }
 
     pub fn ldx(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+
+        let regs = cpu.regset_mut();
+        regs.set_x_index(fetched);
+
+        regs.set_zero(fetched == 0);
+        regs.set_negative(fetched & 0x80 > 0);
+
         Ok(())
     }
 
     pub fn ldy(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = verify_and_fetch(cpu)? as u8;
+
+        let regs = cpu.regset_mut();
+        regs.set_y_index(fetched);
+
+        regs.set_zero(fetched == 0);
+        regs.set_negative(fetched & 0x80 > 0);
+
         Ok(())
     }
 
@@ -1286,15 +1310,54 @@ mod m6502_intruction_set {
     }
 
     pub fn sta(cpu: &mut Cpu) -> Result<(), CpuError> {
-        Ok(())
+        let _ = verify_and_fetch(cpu)?;
+
+        let a = cpu.regset().accumulator();
+
+        if let Some(i) = cpu.i.as_ref() {
+            if let Fetched {value: _, address} = i.amode_output {
+                cpu.writ_byte(address, a);
+                return Ok(());
+            } else {
+                return Err(CpuError::BadAddressing);
+            }
+        }
+
+        Err(CpuError::CurrentInstructionMissing)
     }
 
     pub fn stx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        Ok(())
+        let _ = verify_and_fetch(cpu)?;
+
+        let x = cpu.regset().x_index();
+
+        if let Some(i) = cpu.i.as_ref() {
+            if let Fetched {value: _, address} = i.amode_output {
+                cpu.writ_byte(address, x);
+                return Ok(());
+            } else {
+                return Err(CpuError::BadAddressing);
+            }
+        }
+
+        Err(CpuError::CurrentInstructionMissing)
     }
 
     pub fn sty(cpu: &mut Cpu) -> Result<(), CpuError> {
-        Ok(())
+        let _ = verify_and_fetch(cpu)?;
+
+        let y = cpu.regset().y_index();
+
+        if let Some(i) = cpu.i.as_ref() {
+            if let Fetched {value: _, address} = i.amode_output {
+                cpu.writ_byte(address, y);
+                return Ok(());
+            } else {
+                return Err(CpuError::BadAddressing);
+            }
+        }
+
+        Err(CpuError::CurrentInstructionMissing)
     }
 
     pub fn tax(cpu: &mut Cpu) -> Result<(), CpuError> {
@@ -1593,7 +1656,7 @@ use super::*;
             assert_eq!(cpu.pc(), 0xAAAA);
         }
 
-        /// This tests all "Clear ... flag" instructions
+        /// This test is for all "Clear ... flag" instructions
         /// CLI, CLD, CLS, CLV
         #[test]
         fn test_clear_flag_bits() {
@@ -1618,6 +1681,111 @@ use super::*;
             assert_eq!(regs.overflowed(), false);
             assert_eq!(regs.decimal_mode(), false);
             assert_eq!(regs.irq_disabled(), false);
+        }
+
+        #[test]
+        fn test_sta() {
+            let mut cpu = setup(0xFEBE, true, Some(0x9D), Some(0x10 + 0x13));
+            cpu.regset_mut().set_accumulator(0xAA);
+            cpu.regset_mut().set_x_index(0x13);
+            set_amode_output(&mut cpu, Fetched { value:0x12, address: 0x10 + 0x13 });
+            let regs = cpu.regset_mut();
+
+            let res = sta(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.accumulator(), 0xAA);
+            let read_value = cpu.read_word(0x10 + 0x13);
+            assert_eq!(read_value, 0xAA);
+        }
+
+        #[test]
+        fn test_stx() {
+            let mut cpu = setup(0xFEBE, true, Some(0x86), Some(0x10));
+            cpu.regset_mut().set_x_index(0xBB);
+            set_amode_output(&mut cpu, Fetched { value: 0x11, address: 0xEE });
+            let regs = cpu.regset_mut();
+
+            let res = stx(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.x_index(), 0xBB);
+            let read_value = cpu.read_word(0xEE);
+            assert_eq!(read_value, 0xBB);
+        }
+
+        #[test]
+        fn test_sty() {
+            let mut cpu = setup(0xFEBE, true, Some(0x84), Some(0x10));
+            cpu.regset_mut().set_y_index(0xBB);
+            set_amode_output(&mut cpu, Fetched { value: 0x11, address: 0xCD });
+
+            let res = sty(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.y_index(), 0xBB);
+            let read_value = cpu.read_word(0xCD);
+            assert_eq!(read_value, 0xBB);
+        }
+
+        #[test]
+        fn test_lda() {
+            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
+            let regs = cpu.regset();
+
+            set_amode_output(&mut cpu, ValueOnly(0x10));
+            let res = lda(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.accumulator(), 0x10);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
+
+        }
+
+        #[test]
+        fn test_lda_negative() {
+            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
+
+            set_amode_output(&mut cpu, Fetched {value: 0x80, address: 0xFE });
+            let res = lda(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.accumulator(), 0x80);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_ldx_zero() {
+            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
+            set_amode_output(&mut cpu, Fetched {value: 0x00, address: 0xFE });
+
+            let res = ldx(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.x_index(), 0x00);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), true);
+        }
+
+        #[test]
+        fn test_ldy() {
+            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
+            set_amode_output(&mut cpu, Fetched {value: 0x10, address: 0xFE });
+
+            let res = ldy(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.y_index(), 0x10);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
         }
     }
 }
