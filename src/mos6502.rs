@@ -1,14 +1,14 @@
-use std::fmt::Display;
+use crate::mos6502::m6502_addressing_modes as other_m6502_addressing_modes;
+use crate::mos6502::m6502_intruction_set::*;
+use crate::mos6502::InterruptKind::Irq;
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
-use std::{fmt, fmt::Debug};
+use std::fmt::Display;
 use std::fs::File;
-use std::rc::Rc;
-use std::{io, io::prelude::*};
-use crate::mos6502::m6502_intruction_set::*;
 use std::ops::Add;
-use crate::mos6502::InterruptKind::Irq;
-use crate::mos6502::m6502_addressing_modes as other_m6502_addressing_modes;
+use std::rc::Rc;
+use std::{fmt, fmt::Debug};
+use std::{io, io::prelude::*};
 
 pub type Address = u16;
 pub type Word = u16;
@@ -16,7 +16,7 @@ pub type Opcode = u8;
 pub type Byte = u8;
 
 pub type AddressingModeFn = fn(&mut Cpu) -> Result<AddressingOutput, CpuError>;
-pub type InstructionFn = fn(&mut Cpu);
+pub type InstructionFn = fn(&mut Cpu) -> Result<(), CpuError>;
 
 /// This structure represents the registers each MOS 6502 has.
 /// They include one 8-bit accumulator register (A), two 8-bit
@@ -161,7 +161,6 @@ pub enum InterruptKind {
 const NMI_VECTOR: Address = 0xfffa;
 const RESET_VECTOR: Address = 0xfffc;
 const IRQ_VECTOR: Address = 0xfffe;
-
 
 ///
 /// Cpu
@@ -537,7 +536,8 @@ macro_rules! make_illegal {
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum AddressingOutput {
-    Fetched(Byte),
+    Fetched{ value: Byte, address: Address },
+    ValueOnly(Byte),
     AbsoluteAddress(Word),
     NotExecuted,
 }
@@ -563,7 +563,6 @@ impl Display for AddressingMode {
         write!(f, "{:?}", self)
     }
 }
-
 
 ///
 /// Instruction
@@ -613,7 +612,6 @@ pub struct Instruction {
 }
 
 impl Display for Instruction {
-
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> fmt::Result {
         use AddressingMode::*;
 
@@ -634,13 +632,19 @@ impl Display for Instruction {
         };
         let addressing_mode = format!("\t| {}", self.amode);
 
-        write!(f, "{}", format!("{address}{mnemonic}\t{prefix}{operand}{suffix}{addressing_mode}\n",
-                address=address,
-                mnemonic=self.mnemonic,
-                prefix=details.0,
-                operand=operand,
-                suffix=details.1,
-                addressing_mode=addressing_mode))
+        write!(
+            f,
+            "{}",
+            format!(
+                "{address}{mnemonic}\t{prefix}{operand}{suffix}{addressing_mode}\n",
+                address = address,
+                mnemonic = self.mnemonic,
+                prefix = details.0,
+                operand = operand,
+                suffix = details.1,
+                addressing_mode = addressing_mode
+            )
+        )
     }
 }
 
@@ -675,7 +679,7 @@ impl Clone for Instruction {
             size: self.size,
             operand: self.operand.clone(),
             amode_output: self.amode_output,
-            loaded_from: self.loaded_from
+            loaded_from: self.loaded_from,
         }
     }
 }
@@ -694,8 +698,8 @@ impl Instruction {
     ///
     fn decode_by(opcode: Byte) -> Instruction {
         use m6502_addressing_modes::*;
-        use AddressingMode::*;
         use m6502_intruction_set::*;
+        use AddressingMode::*;
 
         return match opcode {
             // opcode => make_instr! (
@@ -891,119 +895,291 @@ impl Instruction {
 /// Legal MOS 6502 instructions
 ///
 mod m6502_intruction_set {
-    use super::Cpu;
+    use super::{Word, Opcode, Cpu, Instruction, MainBus, CpuError, AddressingMode::*};
 
-    pub fn adc(_cpu: &mut Cpu) {}
+    fn verify_and_fetch(cpu: &mut Cpu) -> Result<Word, CpuError> {
 
-    pub fn and(_cpu: &mut Cpu) {}
+        if let Some(i) = &cpu.i {
+            if let Some(operand) = &i.operand {
+                return Ok(*operand);
+            } else {
+                return Err(CpuError::ExpectedOperandMissing);
+            }
+        }
 
-    pub fn asl(_cpu: &mut Cpu) {}
+        Err(CpuError::CurrentInstructionMissing)
+    }
 
-    pub fn bcc(_cpu: &mut Cpu) {}
 
-    pub fn bcs(_cpu: &mut Cpu) {}
+    /// TODO:
+    /// adc - Add with carry
+    /// 
+    /// V <- ~(A^M) & A^(A+M+C)
+    /// V = ~(A^M) & (A^R)
+    pub fn adc(cpu: &mut Cpu)  -> Result<(), CpuError>{
+        let fetched = verify_and_fetch(cpu)?;
 
-    pub fn beq(_cpu: &mut Cpu) {}
+        let regs = cpu.regset_mut();
+        let accumulator = u16::from(regs.accumulator());
+        let tmp: u16 = accumulator + fetched + u16::from(regs.carry());
 
-    pub fn bit(_cpu: &mut Cpu) {}
+        regs.set_carry(tmp > 0xFF); 
+        regs.set_zero((tmp & 0x00FF) == 0);
+        regs.set_negative((tmp & 0x80) > 0);
+        regs.set_overflowed((!(accumulator ^ fetched) & (accumulator ^ tmp) & 0x80) > 0);
 
-    pub fn bmi(_cpu: &mut Cpu) {}
+        regs.set_accumulator((tmp & 0x00FF) as u8);
 
-    pub fn bne(_cpu: &mut Cpu) {}
+        Ok(())
+    }
 
-    pub fn bpl(_cpu: &mut Cpu) {}
+    pub fn and(cpu: &mut Cpu) -> Result<(), CpuError> { 
+        let fetched_u16 = verify_and_fetch(cpu)?;
+        let fetched = fetched_u16 as u8;
 
-    pub fn brk(_cpu: &mut Cpu) {}
+        let a = cpu.regset().accumulator & fetched;
+        let regs = cpu.regset_mut();
 
-    pub fn bvc(_cpu: &mut Cpu) {}
+        regs.set_accumulator(a);
 
-    pub fn bvs(_cpu: &mut Cpu) {}
+        regs.set_zero(a == 0x00);
+        regs.set_negative(a & 0x80 > 0);
 
-    pub fn clc(_cpu: &mut Cpu) {}
+        Ok(())
+    }
 
-    pub fn cld(_cpu: &mut Cpu) {}
+    pub fn asl(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched_u16 = verify_and_fetch(cpu)?;
+        let fetched = fetched_u16 as u8;
 
-    pub fn cli(_cpu: &mut Cpu) {}
+        let tmp = fetched_u16 << 1;
+        let lo = (tmp & 0x00FF) as u8;
 
-    pub fn clv(_cpu: &mut Cpu) {}
+        if let Some(i) = cpu.i.as_ref() {
+            match i.amode {
+                Imp => {
+                    let _ = cpu.regset_mut().set_accumulator(lo);
+                },
+                _ => {
+                    let address = i.amode_output;
+                    cpu.writ_byte(0x0000, lo);
+                }
+            };
+        }
 
-    pub fn cmp(_cpu: &mut Cpu) {}
+        let regs = cpu.regset_mut();
+        regs.set_carry((tmp & 0xFF00) > 0);
+        regs.set_zero(lo == 0);
+        regs.set_negative((tmp & 0x80) > 0); 
 
-    pub fn cpx(_cpu: &mut Cpu) {}
+        Ok(())
+    }
 
-    pub fn cpy(_cpu: &mut Cpu) {}
+    pub fn bcc(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
 
-    pub fn dec(_cpu: &mut Cpu) {}
+    pub fn bcs(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
 
-    pub fn dex(_cpu: &mut Cpu) {}
+    pub fn beq(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
 
-    pub fn dey(_cpu: &mut Cpu) {}
+    pub fn bit(cpu: &mut Cpu)  -> Result<(), CpuError> { Ok(()) }
 
-    pub fn eor(_cpu: &mut Cpu) {}
+    pub fn bmi(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn inc(_cpu: &mut Cpu) {}
+    pub fn bne(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn inx(_cpu: &mut Cpu) {}
+    pub fn bpl(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn iny(_cpu: &mut Cpu) {}
+    pub fn brk(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn jmp(_cpu: &mut Cpu) {}
+    pub fn bvc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn jsr(_cpu: &mut Cpu) {}
+    pub fn bvs(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn lda(_cpu: &mut Cpu) {}
+    pub fn clc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn ldx(_cpu: &mut Cpu) {}
+    pub fn cld(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn ldy(_cpu: &mut Cpu) {}
+    pub fn cli(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn lsr(_cpu: &mut Cpu) {}
+    pub fn clv(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn nop(_cpu: &mut Cpu) {}
+    pub fn cmp(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn ora(_cpu: &mut Cpu) {}
+    pub fn cpx(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn pha(_cpu: &mut Cpu) {}
+    pub fn cpy(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn php(_cpu: &mut Cpu) {}
+    pub fn dec(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn pla(_cpu: &mut Cpu) {}
+    pub fn dex(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn plp(_cpu: &mut Cpu) {}
+    pub fn dey(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn rol(_cpu: &mut Cpu) {}
+    pub fn eor(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn ror(_cpu: &mut Cpu) {}
+    pub fn inc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn rti(_cpu: &mut Cpu) {}
+    pub fn inx(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn rts(_cpu: &mut Cpu) {}
+    pub fn iny(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sbc(_cpu: &mut Cpu) {}
+    pub fn jmp(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sec(_cpu: &mut Cpu) {}
+    pub fn jsr(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sed(_cpu: &mut Cpu) {}
+    pub fn lda(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sei(_cpu: &mut Cpu) {}
+    pub fn ldx(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sta(_cpu: &mut Cpu) {}
+    pub fn ldy(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn stx(_cpu: &mut Cpu) {}
+    pub fn lsr(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn sty(_cpu: &mut Cpu) {}
+    pub fn nop(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn tax(_cpu: &mut Cpu) {}
+    pub fn ora(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn tay(_cpu: &mut Cpu) {}
+    pub fn pha(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn tsx(_cpu: &mut Cpu) {}
+    pub fn php(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn txa(_cpu: &mut Cpu) {}
+    pub fn pla(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn txs(_cpu: &mut Cpu) {}
+    pub fn plp(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
 
-    pub fn tya(_cpu: &mut Cpu) {}
+    pub fn rol(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn ror(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn rti(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn rts(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sbc(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sec(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sed(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sei(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sta(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn stx(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn sty(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn tax(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn tay(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn tsx(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn txa(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn txs(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    pub fn tya(cpu: &mut Cpu) -> Result<(), CpuError> { Ok(()) }
+
+    #[cfg(test)]
+    mod test {
+
+        use std::rc::Rc;
+        use std::cell::RefCell;
+        use super::*;
+
+        fn setup(custom_pc: Word, connect: bool, opcode: Option<Opcode>, operand: Option<Word>) -> Cpu {
+            let mut cpu = Cpu::new_custompc(custom_pc);
+
+            if let Some(opc) = opcode {
+                cpu.i = Some(Instruction::decode_by(opc));
+                cpu.i.as_mut().unwrap().operand = operand;
+            }
+
+            if connect {
+                cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
+            }
+
+            cpu
+        }
+
+        #[test]
+        fn test_adc_regular() {
+            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x10));
+
+            let res = adc(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x10);
+            assert_eq!(regs.carry(), false);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.overflowed(), false);
+        }
+
+        #[test]
+        fn test_adc_negative() {
+            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x80));
+
+            let res = adc(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x80);
+            assert_eq!(regs.carry(), false);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.overflowed(), false);
+        }
+
+        #[test]
+        fn test_adc_zero() {
+            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x00));
+
+            let res = adc(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x0);
+            assert_eq!(regs.carry(), false);
+            assert_eq!(regs.zero(), true);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.overflowed(), false);
+        }
+
+        #[test]
+        fn test_adc_carry() {
+            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
+            cpu.regset_mut().set_accumulator(0xFF);
+
+            let res = adc(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x00);
+            assert_eq!(regs.carry(), true);
+            assert_eq!(regs.zero(), true);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.overflowed(), false);
+        }
+
+        #[test]
+        fn test_adc_overflowed() {
+            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
+            cpu.regset_mut().set_accumulator(0x7F);
+
+            let res = adc(&mut cpu);
+
+            assert_eq!(res.ok(), Some(()));
+            let regs = cpu.regset();
+            assert_eq!(regs.accumulator(), 0x80);
+            assert_eq!(regs.carry(), false);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.overflowed(), true);
+        }
+    }
 }
 
 ///
@@ -1016,9 +1192,9 @@ mod m6502_addressing_modes {
     use super::{AddressingOutput, AddressingOutput::*, CpuError, CpuError::*};
     use super::{Cpu, Instruction, MainBus};
 
+    use crate::mos6502::{AddressingMode, AddressingModeFn};
     use std::cell::RefCell;
     use std::rc::Rc;
-    use crate::mos6502::{AddressingMode, AddressingModeFn};
 
     #[inline]
     pub fn to_fun(amode: AddressingMode) -> AddressingModeFn {
@@ -1063,9 +1239,8 @@ mod m6502_addressing_modes {
     //  accumulator. That is why the contents of the
     //  accumulator are set as this addressing mode's output.
     //
-    pub fn implied_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
-        let accumulator = cpu.regset().accumulator();
-        let fetched = Fetched(accumulator);
+    pub fn implied_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> { let accumulator = cpu.regset().accumulator();
+        let fetched = ValueOnly(accumulator);
 
         Ok(fetched)
     }
@@ -1078,7 +1253,7 @@ mod m6502_addressing_modes {
     pub fn immediate_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let i = cpu.i.as_ref().unwrap();
         if let Some(operand) = i.operand {
-            let fetched = Fetched(operand as u8);
+            let fetched = ValueOnly(operand as u8);
             Ok(fetched)
         } else {
             Err(ExpectedOperandMissing)
@@ -1095,7 +1270,7 @@ mod m6502_addressing_modes {
     ///
     pub fn zeropage_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         return match read_from_operand_with_offset(cpu, 0, true) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1110,7 +1285,7 @@ mod m6502_addressing_modes {
     pub fn zeropage_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().x_index() as Address;
         return match read_from_operand_with_offset(cpu, offset, true) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1124,7 +1299,7 @@ mod m6502_addressing_modes {
     pub fn zeropage_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().y_index() as Address;
         return match read_from_operand_with_offset(cpu, offset, true) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1138,7 +1313,7 @@ mod m6502_addressing_modes {
         cpu: &mut Cpu,
         offset: Address,
         zeropage: bool,
-    ) -> Result<Byte, CpuError> {
+    ) -> Result<(Address, Byte), CpuError> {
         let i = cpu.i.as_ref().unwrap();
         if let Some(mut operand) = i.operand {
             operand += offset;
@@ -1149,7 +1324,7 @@ mod m6502_addressing_modes {
                     mark_extra_clockcycle(cpu);
                 }
             }
-            return Ok(cpu.read_byte(operand));
+            return Ok((operand, cpu.read_byte(operand)));
         }
         Err(ExpectedOperandMissing)
     }
@@ -1163,7 +1338,7 @@ mod m6502_addressing_modes {
     ///
     pub fn absolute_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         return match read_from_operand_with_offset(cpu, 0, false) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1177,7 +1352,7 @@ mod m6502_addressing_modes {
     pub fn absolute_x_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().x_index() as Address;
         return match read_from_operand_with_offset(cpu, offset, false) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1193,7 +1368,7 @@ mod m6502_addressing_modes {
     pub fn absolute_y_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let offset = cpu.regset().y_index() as Address;
         return match read_from_operand_with_offset(cpu, offset, false) {
-            Ok(value) => Ok(Fetched(value)),
+            Ok((address, value)) => Ok(Fetched { value: value, address: address}),
             Err(e) => Err(e),
         };
     }
@@ -1265,9 +1440,8 @@ mod m6502_addressing_modes {
             let hi = cpu.read_byte((offset + 1) & 0x00FF);
 
             let next_address = Address::from_le_bytes([lo, hi]);
-            let value = cpu.read_byte(next_address);
 
-            return Ok(Fetched(value));
+            return Ok(Fetched { value: cpu.read_byte(next_address), address: next_address });
         }
 
         Err(ExpectedOperandMissing)
@@ -1288,8 +1462,7 @@ mod m6502_addressing_modes {
                 mark_extra_clockcycle(cpu);
             }
 
-            let value = cpu.read_byte(offset_address);
-            return Ok(Fetched(value));
+            return Ok(Fetched { value: cpu.read_byte(offset_address), address: offset_address });
         }
 
         Err(ExpectedOperandMissing)
@@ -1324,7 +1497,7 @@ mod m6502_addressing_modes {
 
             let result = implied_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x1A)));
+            assert_eq!(result.ok(), Some(ValueOnly(0x1A)));
             assert_eq!(cpu.pc(), 0x0000);
         }
 
@@ -1335,7 +1508,7 @@ mod m6502_addressing_modes {
 
             let result = immediate_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(ValueOnly(0x10)));
             assert_eq!(cpu.pc(), 0x0000);
         }
 
@@ -1346,7 +1519,7 @@ mod m6502_addressing_modes {
 
             let result = zeropage_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched {value: 0x10, address: 0x35} ));
         }
 
         #[test]
@@ -1357,7 +1530,7 @@ mod m6502_addressing_modes {
 
             let result = zeropage_x_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched {value: 0x10, address: 0x35 + 3} ));
         }
 
         #[test]
@@ -1368,7 +1541,7 @@ mod m6502_addressing_modes {
 
             let result = zeropage_y_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched {value: 0x10, address: 0x35 - 1} ));
         }
 
         #[test]
@@ -1378,7 +1551,7 @@ mod m6502_addressing_modes {
 
             let result = absolute_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched {value: 0x10, address: 0x210} ));
         }
 
         #[test]
@@ -1389,7 +1562,7 @@ mod m6502_addressing_modes {
 
             let result = absolute_y_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x10, address: 0x210 + 0xA }));
         }
 
         #[test]
@@ -1444,7 +1617,7 @@ mod m6502_addressing_modes {
 
             let result = indirect_x_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x10)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x10, address: 0x2074 }));
         }
 
         #[test]
@@ -1457,7 +1630,7 @@ mod m6502_addressing_modes {
 
             let result = indirect_x_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x19)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x19, address: 0xA701 }));
         }
 
         #[test]
@@ -1470,7 +1643,7 @@ mod m6502_addressing_modes {
 
             let result = indirect_x_am(&mut cpu);
 
-            assert_eq!(result.ok(), Some(Fetched(0x17)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x17, address: 0xFE01 }));
         }
 
         #[test]
@@ -1484,7 +1657,7 @@ mod m6502_addressing_modes {
             let result = indirect_y_am(&mut cpu);
             let marked_extra_cycle = cpu.time.residual == 1;
 
-            assert_eq!(result.ok(), Some(Fetched(0x34)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x34, address: 0xA80F }));
             assert_eq!(marked_extra_cycle, true);
         }
 
@@ -1499,7 +1672,7 @@ mod m6502_addressing_modes {
             let result = indirect_y_am(&mut cpu);
             let marked_extra_cycle = cpu.time.residual == 1;
 
-            assert_eq!(result.ok(), Some(Fetched(0x34)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x34, address: 0xA711 }));
             assert_eq!(marked_extra_cycle, false);
         }
 
@@ -1514,11 +1687,9 @@ mod m6502_addressing_modes {
             let result = indirect_y_am(&mut cpu);
             let marked_extra_cycle = cpu.time.residual == 1;
 
-            assert_eq!(result.ok(), Some(Fetched(0x37)));
+            assert_eq!(result.ok(), Some(Fetched{ value: 0x37, address: 0x4038 }));
             assert_eq!(marked_extra_cycle, false);
         }
-
-
     }
 }
 
@@ -1534,26 +1705,27 @@ pub struct Asm {
 }
 
 impl Asm {
-    pub fn from_addr_range(cpu: &mut Cpu, begin_address: Address, limit: u16) -> Asm
-    {
+    pub fn from_addr_range(cpu: &mut Cpu, begin_address: Address, limit: u16) -> Asm {
         let mut code: Vec<Instruction> = Vec::new();
 
         let end_address = begin_address + limit;
         let mut address = begin_address;
         while address < end_address {
             let opcode = cpu.read_byte(address);
-                let mut i = Instruction::decode_by(opcode);
-                load_operand(cpu, &mut i, address);
-                address += i.size;
-                code.push(i);
+            let mut i = Instruction::decode_by(opcode);
+            load_operand(cpu, &mut i, address);
+            address += i.size;
+            code.push(i);
         }
 
-        Asm {
-            code
-        }
+        Asm { code }
     }
 
-    pub fn stringify_range(cpu: &mut Cpu, begin_address: Address, limit: u16) -> Result<String, ()> {
+    pub fn stringify_range(
+        cpu: &mut Cpu,
+        begin_address: Address,
+        limit: u16,
+    ) -> Result<String, ()> {
         let asm = Asm::from_addr_range(cpu, begin_address, limit);
         asm.stringify(true, true)
     }
@@ -1618,8 +1790,7 @@ impl Cpu {
 
     pub fn print_disassembly(&mut self, begin: Address, limit: Address) {
         if let Some(disassembly) = self.disassemble(begin, limit) {
-            for i in disassembly.code.iter() {
-            } 
+            for i in disassembly.code.iter() {}
         }
     }
 
@@ -1670,7 +1841,6 @@ impl Cpu {
     }
 }
 
-
 /// **load_operand_curr_i()** - This is called right before
 /// the addressing mode specifics are executed in order
 /// to fetch the required operand into the operand
@@ -1685,7 +1855,7 @@ pub fn load_operand_curr_i(cpu: &mut Cpu) {
     // The instruction is already loaded since we are looking at it
     // The reason we are updating this value here and not beforehand
     // is sa that a support could be provided for `load_operand()`
-    // also a.k.a so that we can load operands for instructions 
+    // also a.k.a so that we can load operands for instructions
     // which are not the current one whici is being executed.
     let loaded_from: Address = cpu.pc() - 1;
 
@@ -1711,7 +1881,6 @@ pub fn load_operand_curr_i(cpu: &mut Cpu) {
     i.operand = operand;
 }
 
-
 /// **load_operand()** - For any given instruction (only the addressing mode
 /// is actually of importance here, fetch any operands that the instruction
 /// requires taking into account that the address of the instruction in memory
@@ -1736,12 +1905,10 @@ pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
     *cpu.regset_mut().prog_counter_mut() = saved_pc;
 }
 
-
-
 #[cfg(test)]
 mod test {
-    use super::*;
     use super::AddressingOutput::*;
+    use super::*;
 
     #[test]
     fn test_create_cpu() {
@@ -1899,9 +2066,11 @@ mod test {
         let prog: Vec<Byte> = vec![162, 10, 142, 0, 0, 162, 3];
         let old_pc = cpu.load_program(&prog, 0x8000, 7, true);
         let expected_asm = Asm {
-            code: vec![Instruction::decode_by(162),
-                        Instruction::decode_by(142),
-                        Instruction::decode_by(162),]
+            code: vec![
+                Instruction::decode_by(162),
+                Instruction::decode_by(142),
+                Instruction::decode_by(162),
+            ],
         };
 
         let asm = cpu.disassemble(0x8000, 7);
@@ -1916,11 +2085,11 @@ mod test {
         cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
 
         let expected_asm = Asm {
-            code:vec![
-                Instruction::decode_by(0xA9), 
-                Instruction::decode_by(0x85), 
-                Instruction::decode_by(0xA9), 
-            ]
+            code: vec![
+                Instruction::decode_by(0xA9),
+                Instruction::decode_by(0x85),
+                Instruction::decode_by(0xA9),
+            ],
         };
 
         let old_pc = cpu.load_file("src/test.bin", 0x8000, true);
@@ -1939,7 +2108,10 @@ mod test {
 
         cpu.clock_cycle();
 
-        assert_eq!(cpu.i.as_ref().unwrap().amode_output, AddressingOutput::Fetched(0x02));
+        assert_eq!(
+            cpu.i.as_ref().unwrap().amode_output,
+            AddressingOutput::ValueOnly(0x02)
+        );
         assert_eq!(cpu.pc(), 0x8002);
         assert_eq!(wrapped_old_pc.ok(), Some(0x0000));
     }
@@ -1956,9 +2128,13 @@ mod test {
 
         let success = cpu.inthandle(Irq);
         // irq cycles
-        for _ in 0..7 { cpu.clock_cycle(); }
+        for _ in 0..7 {
+            cpu.clock_cycle();
+        }
         // "lda #10" cycles
-        for _ in 0..2 { cpu.clock_cycle(); }
+        for _ in 0..2 {
+            cpu.clock_cycle();
+        }
 
         assert_eq!(success, true);
         assert_eq!(cpu.time.residual, 0);
@@ -1996,9 +2172,13 @@ mod test {
 
         let success = cpu.inthandle(InterruptKind::Nmi);
         // irq cycles
-        for _ in 0..8 { cpu.clock_cycle(); }
+        for _ in 0..8 {
+            cpu.clock_cycle();
+        }
         // "lda #10" cycles
-        for _ in 0..2 { cpu.clock_cycle(); }
+        for _ in 0..2 {
+            cpu.clock_cycle();
+        }
 
         assert_eq!(success, true);
         assert_eq!(cpu.time.residual, 0);
@@ -2007,17 +2187,17 @@ mod test {
     }
 
     fn setup(custom_pc: Word, connect: bool, opcode: Opcode, operand: Option<Word>) -> Cpu {
-            let mut cpu = Cpu::new_custompc(custom_pc);
+        let mut cpu = Cpu::new_custompc(custom_pc);
 
-            cpu.i = Some(Instruction::decode_by(opcode));
-            cpu.i.as_mut().unwrap().operand = operand;
+        cpu.i = Some(Instruction::decode_by(opcode));
+        cpu.i.as_mut().unwrap().operand = operand;
 
-            if connect {
-                cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-            }
-
-            cpu
+        if connect {
+            cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
         }
+
+        cpu
+    }
 
     #[test]
     fn test_prepare_operands_zero() {
@@ -2145,10 +2325,12 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 2);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tbrk\t\t| Imp\n\
                 0x1001\tlda\t#0x10\t| Imm\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2163,10 +2345,12 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tadc\t0xbbaa\t| Abs\n\
                 0x1003\tadc\t0x30\t| Zp0\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2181,10 +2365,12 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tadc\t0xbbaa, X\t| Abx\n\
                 0x1003\tadc\t0x30, X\t| Zpx\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2199,10 +2385,12 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 5);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tlda\t0xbbaa, Y\t| Aby\n\
                 0x1003\tldx\t0x30, Y\t| Zpy\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2215,9 +2403,11 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tjmp\t(0xbbaa)\t| Ind\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2229,9 +2419,11 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tbcc\t0x80\t| Rel\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2243,9 +2435,11 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tsta\t(0x10), Y\t| Iny\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
 
@@ -2257,10 +2451,11 @@ mod test {
 
         let str_res = Asm::stringify_range(&mut cpu, 0x1000, 1);
 
-        let expected_str = String::from("\
+        let expected_str = String::from(
+            "\
                 0x1000\tsta\t(0x10, X)\t| Inx\n\
-        ");
+        ",
+        );
         assert_eq!(str_res.ok(), Some(expected_str));
     }
-
 }
