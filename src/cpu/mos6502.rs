@@ -66,7 +66,7 @@ impl Instruction {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub struct RegSet {
     pub a: u8,
     pub x: u8,
@@ -381,7 +381,15 @@ impl Cpu {
         (p & 0xFF00) == (q & 0xFF00)
     }
 
-    pub fn disassemble_region(&self, begin: u16, end: u16) -> Asm {
+    pub fn read_region(&self, begin: u16, end: u16) -> Vec<u8> {
+        let mut res = Vec::new();
+        for addr in begin..end + 1 {
+            res.push(self.read_bus(&addr));
+        }
+        res
+    }
+
+    pub fn disasemble_region(&self, begin: u16, end: u16) -> Asm {
         use AddrMode::*;
 
         let mut code_map: HashMap<u16, Box<String>> = HashMap::new();
@@ -408,7 +416,7 @@ impl Cpu {
             line = "".to_string();
             spec = "".to_string();
             let addr_str = temp_addr.to_string();
-            line.push_str(&format!("{:#4x}:\t{}  ", temp_addr, oper.mnemonic));
+            line.push_str(&format!("{:#4x}:    {}  ", temp_addr, oper.mnemonic));
 
             match oper.am {
                 Accumulator => {}
@@ -464,7 +472,7 @@ impl Cpu {
             }
 
             line.push_str(&spec);
-            line.push_str(&format!(" {:?}", oper.am));
+            // line.push_str(&format!(" {:?}", oper.am));
 
             code_map.insert(temp_addr, Box::from(line.clone()));
         }
@@ -636,7 +644,8 @@ pub mod mos6502_addressing_modes {
                 Accumulator => "ACC",
                 Implied => "IMP",
                 Immediate => "IMM",
-                Indirect => "IND", Relative => "REL",
+                Indirect => "IND",
+                Relative => "REL",
                 Absolute => "ABS",
                 ZeroPage => "ZP0",
                 ZeroPageX => "ZPX",
@@ -651,7 +660,7 @@ pub mod mos6502_addressing_modes {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Asm {
     code: HashMap<u16, Box<String>>,
     origin: u16,
@@ -670,7 +679,7 @@ impl std::fmt::Display for Asm {
 impl Asm {
     pub fn from(code_map: HashMap<u16, Box<String>>, origin: u16) -> Self {
         let mut v: Vec<_> = code_map.into_iter().collect();
-        v.sort_by(|x,y| x.0.cmp(&y.0));
+        v.sort_by(|x, y| x.0.cmp(&y.0));
         Self {
             code: HashMap::from_iter(v),
             origin,
