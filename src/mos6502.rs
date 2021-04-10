@@ -1341,10 +1341,28 @@ use super::{
     }
 
     pub fn rti(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let loaded_status = cpu.stk_pop();
+        let lo = cpu.stk_pop();
+        let hi = cpu.stk_pop();
+        let loaded_pc = Address::from_le_bytes([lo, hi]);
+
+        let regs = cpu.regset_mut();
+        regs.set_prog_counter(loaded_pc);
+        regs.set_status(loaded_status);
+
+        regs.set_brk(false);
+        regs.set_unused(false);
+
         Ok(())
     }
 
     pub fn rts(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let lo = cpu.stk_pop();
+        let hi = cpu.stk_pop();
+        let loaded_pc = Address::from_le_bytes([lo, hi]);
+
+        cpu.regset_mut().set_prog_counter(loaded_pc + 1);
+
         Ok(())
     }
 
@@ -1993,6 +2011,46 @@ use super::*;
             assert_eq!(regs.carry(), true);
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_rti() {
+            let mut cpu = setup(0xFEBE, true, Some(0x40), None);
+            set_amode_output(&mut cpu, ValueOnly(0x00));
+            cpu.regset_mut().set_stk_ptr(0xFA);
+            cpu.regset_mut().set_status(0x00);
+            cpu.writ_byte(0x01FB, 0xF1);
+            cpu.writ_byte(0x01FC, 0x01);
+            cpu.writ_byte(0x01FD, 0x40);
+
+            let res = rti(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.prog_counter(), 0x4001);
+            assert_eq!(regs.stk_ptr(), 0xFD);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.zero(), false);
+            assert_eq!(regs.brk(), false);
+            assert_eq!(regs.unused(), false);
+            assert_eq!(regs.status(), 0xC1);
+        }
+
+        #[test]
+        fn test_rts() {
+            let mut cpu = setup(0xFEBE, true, Some(0x40), None);
+            set_amode_output(&mut cpu, ValueOnly(0x00));
+            cpu.regset_mut().set_stk_ptr(0xFB);
+            cpu.regset_mut().set_status(0x00);
+            cpu.writ_byte(0x01FC, 0x12);
+            cpu.writ_byte(0x01FD, 0x21);
+
+            let res = rts(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.prog_counter(), 0x2113);
+            assert_eq!(regs.stk_ptr(), 0xFD);
         }
 
     }
@@ -2654,14 +2712,25 @@ impl Asm {
 const STACK_OFFSET: Address = 0x100;
 
 impl Cpu {
+
+    fn stk_ptr_inc(&mut self) -> u8 {
+        let sptr = self.regset_mut().stk_ptr_mut();
+        *sptr = sptr.wrapping_add(1);
+        *sptr
+    }
+
+    fn stk_ptr_dec(&mut self) -> u8 {
+        let stk_ptr = self.regset().stk_ptr();
+        *self.regset_mut().stk_ptr_mut() = stk_ptr.wrapping_sub(1);
+        stk_ptr
+    }
+
     /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
     /// Note that this routine will fail if no interface is connected.
     fn stk_push(&mut self, data: Byte) {
-        let mut stk_ptr = self.regset().stk_ptr();
+        let stk_ptr = self.stk_ptr_dec();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         self.writ_byte(addr, data);
-        stk_ptr = stk_ptr.wrapping_sub(1);
-        *self.regset_mut().stk_ptr_mut() = stk_ptr;
     }
 
     fn stk_doublepush(&mut self, data: Word) {
@@ -2672,11 +2741,9 @@ impl Cpu {
     /// **stk_pop()** - Pops a byte from the stack stored in memory with offset `STACK_OFFSET`.
     /// **NB:** This routine will fail if no 2 passed; 0 failinterface is connected.
     fn stk_pop(&mut self) -> Byte {
-        let mut stk_ptr = self.regset().stk_ptr();
-        stk_ptr = stk_ptr.wrapping_add(1);
+        let stk_ptr = self.stk_ptr_inc();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         let data = self.read_byte(addr);
-        *self.regset_mut().stk_ptr_mut() = stk_ptr;
         data
     }
 
