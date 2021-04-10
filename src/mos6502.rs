@@ -1194,14 +1194,44 @@ mod m6502_intruction_set {
     }
 
     pub fn inc(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let fetched = (verify_and_fetch(cpu)? as u8).wrapping_add(1);
+        let amode_output = cpu.i.as_ref().unwrap().amode_output;
+
+        let address = match amode_output {
+            Fetched { value: _, address } => address,
+            AbsoluteAddress(address) => address,
+            _ => return Err(CpuError::BadAddressing)
+        };
+
+        cpu.writ_byte(address, fetched);
+        let regs = cpu.regset_mut();
+        regs.set_zero(fetched == 0);
+        regs.set_negative(fetched & 0x80 > 0);
+
         Ok(())
     }
 
     pub fn inx(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let x = cpu.regset().x_index().wrapping_add(1);
+        let regs = cpu.regset_mut();
+
+        regs.set_zero(x == 0);
+        regs.set_negative(x & 0x80 > 0);
+
+        regs.set_x_index(x);
+
         Ok(())
     }
 
     pub fn iny(cpu: &mut Cpu) -> Result<(), CpuError> {
+        let y = cpu.regset().y_index().wrapping_add(1);
+        let regs = cpu.regset_mut();
+
+        regs.set_zero(y == 0);
+        regs.set_negative(y & 0x80 > 0);
+
+        regs.set_y_index(y);
+
         Ok(())
     }
 
@@ -1656,10 +1686,13 @@ use super::*;
             assert_eq!(cpu.pc(), 0xAAAA);
         }
 
-        /// This test is for all "Clear ... flag" instructions
-        /// CLI, CLD, CLS, CLV
         #[test]
         fn test_clear_flag_bits() {
+            //
+            // This test is for all "Clear ... flag" instructions
+            // CLI, CLD, CLS, CLV
+            // 
+            
             let mut cpu = setup(0xFEBE, false, None, None);
             let regs = cpu.regset_mut();
             regs.set_carry(true);
@@ -1787,6 +1820,100 @@ use super::*;
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), false);
         }
+
+        #[test]
+        fn test_inx() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            cpu.regset_mut().set_x_index(0x09);
+            set_amode_output(&mut cpu, ValueOnly(0x09));
+
+            let res = inx(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.x_index(), 0xA);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_inx_zero() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            cpu.regset_mut().set_x_index(0xFF);
+            set_amode_output(&mut cpu, ValueOnly(0xFF));
+
+            let res = inx(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.x_index(), 0x00);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), true);
+        }
+
+        #[test]
+        fn test_inx_negative() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            cpu.regset_mut().set_x_index(0x7F);
+            set_amode_output(&mut cpu, ValueOnly(0x7F));
+
+            let res = inx(&mut cpu);
+
+            let regs = cpu.regset();
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(regs.x_index(), 0x80);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_inc() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            set_amode_output(&mut cpu, Fetched {value: 0x7E, address: 0xFE} );
+
+            let res = inc(&mut cpu);
+
+            let regs = cpu.regset();
+            let read_value = cpu.read_byte(0xFE);
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(read_value, 0x7F);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_inc_negative() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            set_amode_output(&mut cpu, Fetched {value: 0x7F, address: 0xFE} );
+
+            let res = inc(&mut cpu);
+
+            let regs = cpu.regset();
+            let read_value = cpu.read_byte(0xFE);
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(read_value, 0x80);
+            assert_eq!(regs.negative(), true);
+            assert_eq!(regs.zero(), false);
+        }
+
+        #[test]
+        fn test_inc_zero() {
+            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
+            set_amode_output(&mut cpu, Fetched {value: 0xFF, address: 0xFE} );
+
+            let res = inc(&mut cpu);
+
+            let regs = cpu.regset();
+            let read_value = cpu.read_byte(0xFE);
+
+            assert_eq!(res.ok(), Some(()));
+            assert_eq!(read_value, 0x00);
+            assert_eq!(regs.negative(), false);
+            assert_eq!(regs.zero(), true);
+        }
+
     }
 }
 
