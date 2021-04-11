@@ -250,7 +250,7 @@ impl Cpu {
         old_pc
     }
 
-    fn pc(&self) -> Word {
+    pub fn pc(&self) -> Word {
         self.regset.prog_counter
     }
 
@@ -274,7 +274,7 @@ impl std::fmt::Debug for Cpu {
 impl Cpu {
     /// **new()** - Creates a new instance of a cpu with its default
     /// field values
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             regset: RegisterSet::new(),
             time: Timings {
@@ -314,7 +314,7 @@ impl Cpu {
     /// by keeping the amount of cycles which have to
     /// skipped/wasted after each actual instruction
     /// execution.
-    fn clock_cycle(&mut self) {
+    pub fn clock_cycle(&mut self) {
         if self.time.residual() == 0 {
             let opcode = self.fetch();
 
@@ -426,7 +426,7 @@ impl Cpu {
     ///
     /// **read_word()** - Wrapper function for reading two sequential
     /// bytes from the interface **if one is present**.
-    fn read_word(&self, address: Address) -> Word {
+    pub fn read_word(&self, address: Address) -> Word {
         let lo = self.read_byte(address);
         let hi = self.read_byte(address + 1);
         Word::from_le_bytes([lo, hi])
@@ -456,7 +456,7 @@ impl Cpu {
 
 impl Default for Cpu {
     fn default() -> Self {
-        Cpu::new()
+        Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))))
     }
 }
 
@@ -626,8 +626,6 @@ pub struct Instruction {
 
     /// **loaded_from** - The address where the first byte of this
     /// instruction is located in memory
-    ///
-    /// Unused in the current implementation.
     loaded_from: Address,
 }
 
@@ -650,7 +648,7 @@ impl Display for Instruction {
             Some(num) => format!("{:#4x?}", num),
             None => String::new(),
         };
-        let addressing_mode = format!("\t| {}", self.amode);
+        let addressing_mode = format!("\t; {}", self.amode);
 
         write!(
             f,
@@ -908,6 +906,10 @@ impl Instruction {
         self.operand = meta.0;
         self.amode_output = meta.1;
     }
+
+    pub fn load_address(&self) -> Address {
+        self.loaded_from
+    }
 }
 
 ///
@@ -915,12 +917,12 @@ impl Instruction {
 /// Legal MOS 6502 instructions
 ///
 mod m6502_intruction_set {
-    use crate::mos6502::Byte;
-use crate::mos6502::RegisterSet;
-use super::{
+    use super::{
         Address, AddressingMode::*, AddressingOutput::*, Cpu, CpuError, Instruction, MainBus,
         Opcode, Word,
     };
+    use crate::mos6502::Byte;
+    use crate::mos6502::RegisterSet;
     use crate::mos6502::BRK_VECTOR;
 
     fn verify_and_fetch(cpu: &mut Cpu) -> Result<Word, CpuError> {
@@ -1225,7 +1227,7 @@ use super::{
         let address = match amode_output {
             Fetched { value: _, address } => address,
             AbsoluteAddress(address) => address,
-            _ => return Err(CpuError::BadAddressing)
+            _ => return Err(CpuError::BadAddressing),
         };
 
         cpu.writ_byte(address, fetched);
@@ -1388,7 +1390,7 @@ use super::{
         let a = cpu.regset().accumulator();
 
         if let Some(i) = cpu.i.as_ref() {
-            if let Fetched {value: _, address} = i.amode_output {
+            if let Fetched { value: _, address } = i.amode_output {
                 cpu.writ_byte(address, a);
                 return Ok(());
             } else {
@@ -1405,7 +1407,7 @@ use super::{
         let x = cpu.regset().x_index();
 
         if let Some(i) = cpu.i.as_ref() {
-            if let Fetched {value: _, address} = i.amode_output {
+            if let Fetched { value: _, address } = i.amode_output {
                 cpu.writ_byte(address, x);
                 return Ok(());
             } else {
@@ -1422,7 +1424,7 @@ use super::{
         let y = cpu.regset().y_index();
 
         if let Some(i) = cpu.i.as_ref() {
-            if let Fetched {value: _, address} = i.amode_output {
+            if let Fetched { value: _, address } = i.amode_output {
                 cpu.writ_byte(address, y);
                 return Ok(());
             } else {
@@ -1460,8 +1462,8 @@ use super::{
     #[cfg(test)]
     mod test {
 
+        use super::*;
         use crate::mos6502::AddressingOutput;
-use super::*;
         use std::cell::RefCell;
         use std::rc::Rc;
 
@@ -1604,7 +1606,13 @@ use super::*;
         #[test]
         fn test_asl_mem() {
             let mut cpu = setup(0x0000, true, Some(0x06), Some(0xFF));
-            set_amode_output(&mut cpu, Fetched { value: 0x4F, address: 0xFF});
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x4F,
+                    address: 0xFF,
+                },
+            );
             cpu.regset_mut().set_accumulator(0x00);
 
             let res = asl(&mut cpu);
@@ -1684,10 +1692,13 @@ use super::*;
         fn test_bit() {
             let mut cpu = setup(0xFEBE, true, Some(0x24), Some(0x10));
             cpu.regset_mut().set_accumulator(0x07);
-            set_amode_output(&mut cpu, Fetched {
-                value: 0xC7,
-                address: 0xAA,
-            });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0xC7,
+                    address: 0xAA,
+                },
+            );
 
             let res_bit = bit(&mut cpu);
 
@@ -1703,10 +1714,13 @@ use super::*;
             let mut cpu = setup(0xFEBE, true, Some(0x24), Some(0x10));
             cpu.regset_mut().set_accumulator(0x07);
             cpu.regset_mut().set_status(0xA1);
-            set_amode_output(&mut cpu, Fetched {
-                value: 0xC7,
-                address: 0xAA,
-            });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0xC7,
+                    address: 0xAA,
+                },
+            );
             cpu.writ_byte(BRK_VECTOR, 0xAA);
             cpu.writ_byte(BRK_VECTOR + 1, 0xAA);
 
@@ -1734,8 +1748,8 @@ use super::*;
             //
             // This test is for all "Clear ... flag" instructions
             // CLI, CLD, CLS, CLV
-            // 
-            
+            //
+
             let mut cpu = setup(0xFEBE, false, None, None);
             let regs = cpu.regset_mut();
             regs.set_carry(true);
@@ -1764,7 +1778,13 @@ use super::*;
             let mut cpu = setup(0xFEBE, true, Some(0x9D), Some(0x10 + 0x13));
             cpu.regset_mut().set_accumulator(0xAA);
             cpu.regset_mut().set_x_index(0x13);
-            set_amode_output(&mut cpu, Fetched { value:0x12, address: 0x10 + 0x13 });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x12,
+                    address: 0x10 + 0x13,
+                },
+            );
             let regs = cpu.regset_mut();
 
             let res = sta(&mut cpu);
@@ -1780,7 +1800,13 @@ use super::*;
         fn test_stx() {
             let mut cpu = setup(0xFEBE, true, Some(0x86), Some(0x10));
             cpu.regset_mut().set_x_index(0xBB);
-            set_amode_output(&mut cpu, Fetched { value: 0x11, address: 0xEE });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x11,
+                    address: 0xEE,
+                },
+            );
             let regs = cpu.regset_mut();
 
             let res = stx(&mut cpu);
@@ -1796,7 +1822,13 @@ use super::*;
         fn test_sty() {
             let mut cpu = setup(0xFEBE, true, Some(0x84), Some(0x10));
             cpu.regset_mut().set_y_index(0xBB);
-            set_amode_output(&mut cpu, Fetched { value: 0x11, address: 0xCD });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x11,
+                    address: 0xCD,
+                },
+            );
 
             let res = sty(&mut cpu);
 
@@ -1820,14 +1852,19 @@ use super::*;
             assert_eq!(regs.accumulator(), 0x10);
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), false);
-
         }
 
         #[test]
         fn test_lda_negative() {
             let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
 
-            set_amode_output(&mut cpu, Fetched {value: 0x80, address: 0xFE });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x80,
+                    address: 0xFE,
+                },
+            );
             let res = lda(&mut cpu);
 
             let regs = cpu.regset();
@@ -1840,7 +1877,13 @@ use super::*;
         #[test]
         fn test_ldx_zero() {
             let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-            set_amode_output(&mut cpu, Fetched {value: 0x00, address: 0xFE });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x00,
+                    address: 0xFE,
+                },
+            );
 
             let res = ldx(&mut cpu);
 
@@ -1854,7 +1897,13 @@ use super::*;
         #[test]
         fn test_ldy() {
             let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-            set_amode_output(&mut cpu, Fetched {value: 0x10, address: 0xFE });
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x10,
+                    address: 0xFE,
+                },
+            );
 
             let res = ldy(&mut cpu);
 
@@ -1913,7 +1962,13 @@ use super::*;
         #[test]
         fn test_inc() {
             let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(&mut cpu, Fetched {value: 0x7E, address: 0xFE} );
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x7E,
+                    address: 0xFE,
+                },
+            );
 
             let res = inc(&mut cpu);
 
@@ -1929,7 +1984,13 @@ use super::*;
         #[test]
         fn test_inc_negative() {
             let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(&mut cpu, Fetched {value: 0x7F, address: 0xFE} );
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x7F,
+                    address: 0xFE,
+                },
+            );
 
             let res = inc(&mut cpu);
 
@@ -1945,7 +2006,13 @@ use super::*;
         #[test]
         fn test_inc_zero() {
             let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(&mut cpu, Fetched {value: 0xFF, address: 0xFE} );
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0xFF,
+                    address: 0xFE,
+                },
+            );
 
             let res = inc(&mut cpu);
 
@@ -1957,7 +2024,7 @@ use super::*;
             assert_eq!(regs.negative(), false);
             assert_eq!(regs.zero(), true);
         }
-        
+
         #[test]
         fn test_do_compare_greater_than() {
             let mut regset = RegisterSet::default();
@@ -2001,7 +2068,13 @@ use super::*;
         fn test_cmp() {
             let mut cpu = setup(0xFEBE, true, Some(0xD5), None);
             cpu.regset_mut().set_accumulator(0x20);
-            set_amode_output(&mut cpu, Fetched { value: 0x14, address: 0xAE } );
+            set_amode_output(
+                &mut cpu,
+                Fetched {
+                    value: 0x14,
+                    address: 0xAE,
+                },
+            );
 
             let res = cmp(&mut cpu);
 
@@ -2052,7 +2125,6 @@ use super::*;
             assert_eq!(regs.prog_counter(), 0x2113);
             assert_eq!(regs.stk_ptr(), 0xFD);
         }
-
     }
 }
 
@@ -2664,7 +2736,7 @@ mod m6502_addressing_modes {
 /// Some additional functions needed for the cpu
 ///
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Default)]
 pub struct Asm {
     code: Vec<Instruction>,
 }
@@ -2684,6 +2756,10 @@ impl Asm {
         }
 
         Asm { code }
+    }
+
+    pub fn code(&self) -> &Vec<Instruction> {
+        &self.code
     }
 
     pub fn stringify_range(
@@ -2712,7 +2788,6 @@ impl Asm {
 const STACK_OFFSET: Address = 0x100;
 
 impl Cpu {
-
     fn stk_ptr_inc(&mut self) -> u8 {
         let sptr = self.regset_mut().stk_ptr_mut();
         *sptr = sptr.wrapping_add(1);
@@ -2774,14 +2849,14 @@ impl Cpu {
         &mut self,
         program: &Vec<Byte>,
         begin: Address,
-        limit: u16,
+        limit: usize,
         start_it: bool,
     ) -> Result<Address, CpuError> {
         if self.bus_conn.is_none() {
             return Err(CpuError::BusInterfaceMissing);
         }
 
-        let end = begin + limit;
+        let end = begin + limit as u16;
         for address in begin..end {
             let index = usize::from(address - begin);
             self.writ_byte(address, program[index]);
@@ -2798,7 +2873,7 @@ impl Cpu {
     /// **load_file()**  - Given a filename of a binary source file, load the data in memory
     /// starting from address `begin`. If `start_it` is true, the program counter should
     /// be set to `begin` and execute the code.
-    fn load_file(
+    pub fn load_file(
         &mut self,
         filename: &str,
         begin: Address,
@@ -2807,7 +2882,7 @@ impl Cpu {
         let mut program: Vec<Byte> = Vec::new();
         if let Ok(mut file) = File::open(filename) {
             if let Ok(_) = file.read_to_end(&mut program) {
-                return self.load_program(&program, begin, program.len() as u16, start_it);
+                return self.load_program(&program, begin, program.len(), start_it);
             }
         }
 
@@ -3024,12 +3099,10 @@ mod test {
         // NOP
         // NOP
 
-        let len = prog.len() as u16;
-
-        let old_pc = cpu.load_program(&prog, 0x8000, len, true);
+        let old_pc = cpu.load_program(&prog, 0x8000, prog.len(), true);
         assert_eq!(old_pc.ok(), Some(0x1000));
 
-        let read = cpu.read_some(0x8000, len);
+        let read = cpu.read_some(0x8000, prog.len() as u16);
         assert_eq!(read, prog);
     }
 
