@@ -3,5 +3,5 @@ Cargo.lock
 .idea/
 .vscode/
 target
-
+example/target/
 

@@ -306,7 +306,14 @@ impl Cpu {
         }
     }
 
-    ///
+    /// **full_instruction()** - Execute one full instruction
+    pub fn full_instruction(&mut self) {
+        self.clock_cycle();
+        while self.time.residual != 0 {
+            self.clock_cycle();
+        }
+    }
+
     /// **clock_cycle()** - Perform a single cpu cycle
     ///
     /// This implementation is not cycle correct, but
@@ -319,7 +326,7 @@ impl Cpu {
             let opcode = self.fetch();
 
             self.i = Some(Instruction::decode_by(opcode));
-            *self.time_mut().residual_mut() = self.i.as_ref().unwrap().time;
+            self.time.residual = self.i.as_ref().unwrap().time;
             load_operand_curr_i(self);
 
             let address = self.i.as_ref().unwrap().amode_fun;
@@ -330,7 +337,9 @@ impl Cpu {
             }
 
             let execute = self.i.as_ref().unwrap().fun;
-            execute(self);
+            if let Err(_) = execute(self) {
+                panic!("Failed executing");
+            }
         }
 
         self.time_mut().next();
@@ -373,7 +382,7 @@ impl Cpu {
     /// Among the flags in the status register, only the *UNUSED* flag is set.
     /// Reset takes some time, so 8 cycles are set to be remaining in the
     /// internal "clock" of the cpu
-    fn reset(&mut self) {
+    pub fn reset(&mut self) {
         let mut regset = RegisterSet::new();
         regset.set_status(0x00);
         regset.set_unused(true);
@@ -483,7 +492,7 @@ pub struct MainBus {
 impl MainBus {
     pub(crate) fn new() -> Self {
         Self {
-            mem: vec![0x0; RAM_SIZE],
+            mem: vec![0xFF; RAM_SIZE],
         }
     }
 }
@@ -1363,7 +1372,7 @@ mod m6502_intruction_set {
         let hi = cpu.stk_pop();
         let loaded_pc = Address::from_le_bytes([lo, hi]);
 
-        cpu.regset_mut().set_prog_counter(loaded_pc + 1);
+        cpu.regset_mut().set_prog_counter(loaded_pc.wrapping_add(1));
 
         Ok(())
     }
