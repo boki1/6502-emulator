@@ -1,0 +1,45 @@
+; ------------------------------------------------------------------
+; A short program to perform the euclidean algorithm on 2 numbers  |
+;                                                                  |
+; 17-04-2021                                                       |
+; ------------------------------------------------------------------
+; Note: The program is compiled using (this)[https://www.asm80.com/index.html] online tool
+;
+; \brief The routine calculates the greatest common divider between 2 numbers
+;
+; \param The first number is stored at address $A
+; \param The second number is stored at address $B
+;
+; \ret   The result of the routine is stored in the accumulator
+;
+
+main:
+	lda #$c
+	sta $A ; *($A) = 12
+	lda #$12
+	sta $B ; *($B) = 18
+
+gcd:
+	lda $A
+	cmp $B
+	beq end
+	bcs dec_a
+	bmi dec_b
+
+dec_a:
+	lda $A
+	sec
+	sbc $B
+	sta $A
+	jmp gcd
+
+dec_b:
+	lda $B
+	sec
+	sbc $A
+	sta $B
+	jmp gcd
+
+end:
+	lda $A
+	rts
