@@ -11,7 +11,7 @@ enum FibonaciiExampleView {
 
 struct FibonacciExample {
     cpu: Cpu,
-    source_file: String,
+    preassembled_program: Vec<u8>,
     disassembly: Asm,
     pov: FibonaciiExampleView,
     finished: bool,
@@ -19,10 +19,10 @@ struct FibonacciExample {
 }
 
 impl FibonacciExample {
-    fn new(source_file: &str) -> Self {
+    fn new(preassembled_program: Vec<u8>) -> Self {
         Self {
             cpu: Cpu::default(),
-            source_file: source_file.to_string(),
+            preassembled_program,
             disassembly: Asm::default(),
             pov: FibonaciiExampleView::CpuMonitor,
             finished: false,
@@ -33,11 +33,12 @@ impl FibonacciExample {
 
 impl olc::Application for FibonacciExample {
     fn on_user_create(&mut self) -> Result<(), olc::Error> {
-        if let Err(CpuError::FailedLoadingProgram) =
-            self.cpu.load_file(&self.source_file, 0x8000, true)
-        {
-            panic!("Failed opening source file.");
-        }
+        self.cpu.load_program(
+            &self.preassembled_program,
+            0x8000,
+            self.preassembled_program.len(),
+            true,
+        );
 
         self.disassembly = Asm::from_addr_range(&mut self.cpu, 0x8000, 32);
         let regs = self.cpu.regset_mut();
@@ -141,7 +142,11 @@ impl FibonacciExample {
         olc::draw_string(
             20,
             220,
-            &format!("Y = {:#04X?}    PS = {:#04X?}", regs.y_index(), regs.status()),
+            &format!(
+                "Y = {:#04X?}    PS = {:#04X?}",
+                regs.y_index(),
+                regs.status()
+            ),
             olc::WHITE,
         )?;
 
@@ -192,7 +197,13 @@ impl FibonacciExample {
 }
 
 fn main() {
-    let mut fib_program = FibonacciExample::new("src/fib.bin");
+    let assembled_fib_program = vec![
+        0o251, 0o000, 0o205, 0o340, 0o251, 0o001, 0o205, 0o350, 0o242, 0o000, 0o245, 0o350, 0o235,
+        0o020, 0o001, 0o205, 0o360, 0o145, 0o340, 0o205, 0o350, 0o245, 0o360, 0o205, 0o340, 0o350,
+        0o340, 0o012, 0o060, 0o354, 0o140, 0o000,
+    ];
+
+    let mut fib_program = FibonacciExample::new(assembled_fib_program);
 
     olc::start("Fibonacci example", &mut fib_program, 400, 260, 2, 2).unwrap();
 }
