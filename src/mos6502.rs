@@ -1,14 +1,13 @@
-use crate::mos6502::m6502_addressing_modes as other_m6502_addressing_modes;
-use crate::mos6502::m6502_intruction_set::*;
 use crate::mos6502::InterruptKind::Irq;
+use crate::mos6502_instruction_set::*;
+
 use getset::{CopyGetters, Getters, MutGetters, Setters};
 use std::cell::RefCell;
 use std::fmt::Display;
 use std::fs::File;
-use std::ops::Add;
+use std::io::prelude::*;
 use std::rc::Rc;
 use std::{fmt, fmt::Debug};
-use std::{io, io::prelude::*};
 
 pub type Address = u16;
 pub type Word = u16;
@@ -58,7 +57,7 @@ pub type InstructionFn = fn(&mut Cpu) -> Result<(), CpuError>;
 macro_rules! bit_setter {
     ($n: expr, $name: ident) => {
         #[inline]
-        fn $name(&mut self, value: bool) {
+        pub(crate) fn $name(&mut self, value: bool) {
             self.status = (self.status & !(1 << $n)) | ((value as u8) << $n);
         }
     };
@@ -67,7 +66,7 @@ macro_rules! bit_setter {
 macro_rules! bit {
     ($n: expr, $name: ident) => {
         #[inline]
-        fn $name(&self) -> bool {
+        pub(crate) fn $name(&self) -> bool {
             (self.status & (1 << $n)) != 0
         }
     };
@@ -160,10 +159,10 @@ pub enum InterruptKind {
 /// concrete address, also called _vector_.
 /// There is no mistake in the values of `IRQ_VECTOR` and `BRK_VECTOR` - they
 /// both point to 0xfffe.
-const NMI_VECTOR: Address = 0xfffa;
-const RESET_VECTOR: Address = 0xfffc;
-const IRQ_VECTOR: Address = 0xfffe;
-const BRK_VECTOR: Address = 0xfffe;
+pub(crate) const NMI_VECTOR: Address = 0xfffa;
+pub(crate) const RESET_VECTOR: Address = 0xfffc;
+pub(crate) const IRQ_VECTOR: Address = 0xfffe;
+pub(crate) const BRK_VECTOR: Address = 0xfffe;
 
 ///
 /// Cpu
@@ -174,6 +173,7 @@ const BRK_VECTOR: Address = 0xfffe;
 pub struct Cpu {
     /// **regset**
     /// The set of register that the cpu has
+    // #[derive(Getters, CopyGetters, Setters, MutGetters)]
     #[getset(get_copy = "pub", get_mut = "pub")]
     regset: RegisterSet,
 
@@ -211,7 +211,6 @@ pub struct Cpu {
     /// Note the part with "emulate" and not "achieve".
     /// The current implementation is not clock cycle
     /// accurate.
-    #[getset(get_mut = "pub")]
     i: Option<Instruction>,
 }
 
@@ -244,7 +243,7 @@ impl Cpu {
     /// Acts as post-fix increment operation (pc++):
     /// Increments the Program Counter and returns the **old** value.
     #[inline]
-    fn inc_pc(&mut self) -> Word {
+    pub(crate) fn inc_pc(&mut self) -> Word {
         let old_pc = self.regset.prog_counter;
         self.regset.prog_counter = old_pc.wrapping_add(1);
         old_pc
@@ -254,8 +253,21 @@ impl Cpu {
         self.regset.prog_counter
     }
 
-    fn interrupt_handles(&self) -> &InterruptHandling {
+    pub(crate) fn interrupt_handles(&self) -> &InterruptHandling {
         &self.inter
+    }
+
+    pub(crate) fn i(&self) -> Option<&Instruction> {
+        self.i.as_ref()
+    }
+
+    pub(crate) fn i_mut(&mut self) -> Option<&mut Instruction> {
+        self.i.as_mut()
+    }
+
+    pub(crate) fn i_decode_and_set(&mut self, opc: Opcode, optional_operand: Operand) {
+        self.i = Some(Instruction::decode_by(opc));
+        self.i.as_mut().unwrap().operand = optional_operand;
     }
 }
 
@@ -299,7 +311,7 @@ impl Cpu {
         }
     }
 
-    fn new_custompc(custom_prog_counter: Address) -> Self {
+    pub(crate) fn new_custompc(custom_prog_counter: Address) -> Self {
         Self {
             regset: RegisterSet::new_custompc(custom_prog_counter),
             ..Cpu::new()
@@ -352,7 +364,7 @@ impl Cpu {
     /// NMIs cannot be disabled.
     /// In order to allow IRQs, the flag `irq_disabled` in the status
     /// register has to be clear.
-    fn inthandle(&mut self, int: InterruptKind) -> bool {
+    pub fn inthandle(&mut self, int: InterruptKind) -> bool {
         if int == Irq && self.regset().irq_disabled() {
             return false;
         }
@@ -397,7 +409,7 @@ impl Cpu {
 
     /// **connect()** - Connects the cpu to a bus, providing a context
     /// for read and write operations.
-    fn connect_to(&mut self, conn: Rc<RefCell<dyn CommunicationInterface>>) {
+    pub(crate) fn connect_to(&mut self, conn: Rc<RefCell<dyn CommunicationInterface>>) {
         if let None = self.bus_conn {
             self.bus_conn = Some(conn);
         }
@@ -415,7 +427,7 @@ impl Cpu {
     ///
     /// **read_byte()** - Initiates a read request to the interface
     /// **if one is present**
-    fn read_byte(&self, address: Address) -> Byte {
+    pub fn read_byte(&self, address: Address) -> Byte {
         if let Some(bus) = &self.bus_conn {
             if let Some(data) = (*bus.borrow()).read(address) {
                 return data;
@@ -427,7 +439,7 @@ impl Cpu {
     ///
     /// **writ_byte()** - Initiates a write request to the interface
     /// **if one is present**
-    fn writ_byte(&self, address: Address, data: Byte) {
+    pub fn writ_byte(&self, address: Address, data: Byte) {
         if let Some(bus) = &self.bus_conn {
             return (*bus.borrow_mut()).write(address, data);
         }
@@ -444,7 +456,7 @@ impl Cpu {
 
     ///
     /// **read_some()** - Reads sequence of bytes from the interface
-    fn read_some(&self, address: Address, len: u16) -> Vec<Byte> {
+    pub fn read_some(&self, address: Address, len: u16) -> Vec<Byte> {
         if let Some(bus) = &self.bus_conn {
             if let Some(result) = (*bus.borrow()).read_seq(address, len) {
                 return result;
@@ -605,6 +617,7 @@ impl Display for AddressingMode {
 /// such as the operand used and its final result
 /// which might be a value (Fetched) or a address
 /// (Absolute Address).
+///
 pub struct Instruction {
     ///
     /// Meta information
@@ -637,6 +650,28 @@ pub struct Instruction {
     /// **loaded_from** - The address where the first byte of this
     /// instruction is located in memory
     loaded_from: Address,
+}
+
+impl Instruction {
+    pub(crate) fn amode_output(&self) -> AddressingOutput {
+        self.amode_output
+    }
+
+    pub(crate) fn set_amode_output(&mut self, amode_output: AddressingOutput) {
+        self.amode_output = amode_output;
+    }
+
+    pub(crate) fn amode(&self) -> AddressingMode {
+        self.amode
+    }
+
+    pub(crate) fn operand(&self) -> Operand {
+        self.operand
+    }
+
+    pub(crate) fn set_operand(&mut self, operand: Operand) {
+        self.operand = operand;
+    }
 }
 
 impl Display for Instruction {
@@ -724,9 +759,9 @@ impl Instruction {
     ///
     /// **NB:** Illegal opcodes are not supported as of now
     ///
-    fn decode_by(opcode: Byte) -> Instruction {
-        use m6502_addressing_modes::*;
-        use m6502_intruction_set::*;
+    pub(crate) fn decode_by(opcode: Byte) -> Instruction {
+        // use crate::mos6502_addressing_modes::*;
+        // use crate::mos6502_intruction_set::*;
         use AddressingMode::*;
 
         return match opcode {
@@ -908,1896 +943,8 @@ impl Instruction {
         };
     }
 
-    fn meta(&self) -> InstructionMeta {
-        (self.operand, self.amode_output)
-    }
-
-    fn set_meta(&mut self, meta: InstructionMeta) {
-        self.operand = meta.0;
-        self.amode_output = meta.1;
-    }
-
     pub fn load_address(&self) -> Address {
         self.loaded_from
-    }
-}
-
-///
-/// Instruction set
-/// Legal MOS 6502 instructions
-///
-mod m6502_intruction_set {
-    use super::{
-        Address, AddressingMode::*, AddressingOutput::*, Cpu, CpuError, Instruction, MainBus,
-        Opcode, Word,
-    };
-    use crate::mos6502::Byte;
-    use crate::mos6502::RegisterSet;
-    use crate::mos6502::BRK_VECTOR;
-
-    fn verify_and_fetch(cpu: &mut Cpu) -> Result<Word, CpuError> {
-        if let Some(i) = &cpu.i {
-            return match &i.amode_output {
-                Fetched { value, address } => Ok(Word::from(*value)),
-                ValueOnly(value) => Ok(Word::from(*value)),
-                AbsoluteAddress(address) => Ok(*address),
-                NotExecuted => Err(CpuError::BadAddressing),
-            };
-        }
-
-        Err(CpuError::CurrentInstructionMissing)
-    }
-
-    #[inline]
-    fn page_of(addr: Address) -> u8 {
-        ((addr & 0xff00) >> 8) as u8
-    }
-
-    /// Performs the actual branch. Gets called by all 'Branch if ...'
-    /// instructions if their specific predicate is correct (??? is that the right word)
-    /// According to (this )[] website the following rules apply to all branching
-    /// instructions.
-    /// > Add 1 to cycles if branch occurs on same page.
-    /// > Add 2 to cycles if branch occurs to different page.
-    fn do_branch(cpu: &mut Cpu, next_address: Address) {
-        let prog_counter = cpu.regset().prog_counter();
-        let cycles_inc = if page_of(next_address) == page_of(prog_counter) {
-            1
-        } else {
-            2
-        };
-
-        *cpu.time_mut().residual_mut() += cycles_inc;
-        cpu.regset_mut().set_prog_counter(next_address);
-    }
-
-    fn do_compare(regs: &mut RegisterSet, lhs: Byte, rhs: Byte) {
-        let diff = lhs.wrapping_sub(rhs);
-
-        regs.set_carry(lhs >= rhs);
-        regs.set_zero(lhs == rhs);
-        regs.set_negative(diff & 0x80 > 0);
-    }
-
-    /// TODO:
-    /// Document
-
-    /// Add Memory to Accumulator with Carry
-    ///
-    /// `A = A + M + C`
-    ///
-    /// **Negative:** If the result is negative\
-    /// **Carry:** If the result is more than 255\
-    /// **Zero:** If the result is 0\
-    /// **Overflow:** If the result has made a _sign_ overflowed
-    ///
-    pub fn adc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)?;
-
-        let regs = cpu.regset_mut();
-        let accumulator_u16 = u16::from(regs.accumulator());
-        let tmp: u16 = accumulator_u16 + fetched + u16::from(regs.carry());
-        let accumulator = (tmp & 0x00FF) as u8;
-
-        regs.set_carry(tmp > 0xFF);
-        regs.set_zero(accumulator == 0);
-        regs.set_negative((tmp & 0x80) > 0);
-        regs.set_overflowed((!(accumulator_u16 ^ fetched) & (accumulator_u16 ^ tmp) & 0x80) > 0);
-
-        regs.set_accumulator(accumulator);
-
-        Ok(())
-    }
-
-    /// Perform a bitwise "AND" with Memory with Accumulator
-    ///
-    /// **Zero:** If the resulting accumulator value is 0\
-    /// **Negative:** If the resulting accumulator value is a negative number
-    pub fn and(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let a = cpu.regset().accumulator & fetched;
-        let regs = cpu.regset_mut();
-
-        regs.set_accumulator(a);
-
-        regs.set_zero(a == 0x00);
-        regs.set_negative(a & 0x80 > 0);
-
-        Ok(())
-    }
-
-
-    /// Shift left once (Memory or Accumulator)
-    ///
-    /// **Zero:** If the resulting value is 0\
-    /// **Negative:** If the resulting value is a negative number\
-    /// **Carry:** The highest bit of the value
-    pub fn asl(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched_u16 = verify_and_fetch(cpu)?;
-        let fetched_shifted_u16 = fetched_u16 << 1;
-        let val = fetched_u16 as u8;
-        let val_shifted = (fetched_shifted_u16 & 0x00FF) as u8;
-
-        if let Some(i) = cpu.i.as_ref() {
-            if i.amode == Imp {
-                let _ = cpu.regset_mut().set_accumulator(val_shifted);
-            } else if let Fetched { value: _, address } = i.amode_output {
-                cpu.writ_byte(address, val_shifted);
-            } else {
-                return Err(CpuError::BadAddressing);
-            }
-        }
-
-        let regs = cpu.regset_mut();
-        regs.set_carry((fetched_shifted_u16 & 0xFF00) > 0);
-        regs.set_zero(val_shifted == 0);
-        regs.set_negative((fetched_shifted_u16 & 0x80) > 0);
-
-        Ok(())
-    }
-
-    /// Branch on carry clear
-    pub fn bcc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if !regs.carry() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Branch on carry set
-    pub fn bcs(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if regs.carry() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Branch on equal
-    pub fn beq(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if regs.zero() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Test Bits in Memory with Accumulator
-    ///
-    /// **Zero:** Set to the result of logical "AND" between the accumulator and the memory value\
-    /// **Negative:** Set to 7th bit of the memory value \
-    /// **Overflowed:** Set to the 6th bit of the memory value
-    pub fn bit(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)?;
-
-        let regs = cpu.regset_mut();
-        let a = regs.accumulator();
-        regs.set_zero(u16::from(a) & fetched == 0);
-        regs.set_negative(fetched & (1 << 7) > 0);
-        regs.set_overflowed(fetched & (1 << 6) > 0);
-
-        Ok(())
-    }
-
-    /// Branch on negative result
-    pub fn bmi(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if regs.negative() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Branch on not-equal
-    pub fn bne(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if !regs.zero() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Branch on positive result
-    pub fn bpl(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if !regs.negative() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Force break -- Software Interrup
-    ///
-    /// The value of the **Interrupt disabled** flag has to be 0 in order for this to execute
-    pub fn brk(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.inc_pc();
-        cpu.regset_mut().set_irq_disabled(true);
-
-        cpu.stk_doublepush(cpu.pc());
-
-        cpu.regset_mut().set_brk(true);
-        let status = cpu.regset().status();
-        cpu.stk_push(status);
-        cpu.regset_mut().set_brk(false);
-
-        let new_pc = cpu.read_word(BRK_VECTOR);
-        cpu.regset_mut().set_prog_counter(new_pc);
-
-        Ok(())
-    }
-
-    /// Branch on overflow clear
-    pub fn bvc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if !regs.overflowed() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Branch on overflow set
-    pub fn bvs(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let next_address = verify_and_fetch(cpu)?;
-        let regs = cpu.regset();
-
-        if regs.overflowed() {
-            do_branch(cpu, next_address);
-        }
-
-        Ok(())
-    }
-
-    /// Clear carry flag
-    pub fn clc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_carry(false);
-        Ok(())
-    }
-
-    /// Clear decimal mode flag
-    pub fn cld(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_decimal_mode(false);
-        Ok(())
-    }
-
-    /// Clear interrupt disabled flag
-    pub fn cli(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_irq_disabled(false);
-
-        Ok(())
-    }
-
-    /// Clear overflow flag
-    pub fn clv(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_overflowed(false);
-
-        Ok(())
-    }
-
-    /// Compare memory with accumulator
-    ///
-    /// **Zero:** If the values are equal \
-    /// **Negative:** If the accumulator is smaller \
-    /// **Carry:** If the accumulator is less or equal
-    pub fn cmp(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-        let regs: &mut RegisterSet = cpu.regset_mut();
-
-        do_compare(regs, regs.accumulator(), fetched);
-
-        Ok(())
-    }
-
-    ///
-    /// Compare memory with X index
-    ///
-    /// **Zero:** If the values are equal \
-    /// **Negative:** If the X index is smaller \
-    /// **Carry:** If the X index is less or equal
-    pub fn cpx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-        let regs: &mut RegisterSet = cpu.regset_mut();
-
-        do_compare(regs, regs.x_index(), fetched);
-
-        Ok(())
-    }
-
-    ///
-    /// Compare memory with Y index
-    ///
-    /// **Zero:** If the values are equal \
-    /// **Negative:** If the Y index is smaller \
-    /// **Carry:** If the Y index is less or equal
-    pub fn cpy(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-        let regs = cpu.regset_mut();
-
-        do_compare(regs, regs.y_index(), fetched);
-
-        Ok(())
-    }
-
-    ///
-    /// Decrement memory value by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn dec(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = (verify_and_fetch(cpu)? as u8).wrapping_sub(1);
-        let amode_output = cpu.i.as_ref().unwrap().amode_output;
-
-        let address = match amode_output {
-            Fetched { value: _, address } => address,
-            AbsoluteAddress(address) => address,
-            _ => return Err(CpuError::BadAddressing),
-        };
-
-        cpu.writ_byte(address, fetched);
-        let regs = cpu.regset_mut();
-        regs.set_zero(fetched == 0);
-        regs.set_negative(fetched & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Decrement X index by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn dex(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let x = cpu.regset().x_index().wrapping_sub(1);
-        let regs = cpu.regset_mut();
-
-        regs.set_zero(x == 0);
-        regs.set_negative(x & 0x80 > 0);
-
-        regs.set_x_index(x);
-
-        Ok(())
-    }
-
-    ///
-    /// Decrement Y index by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn dey(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let y = cpu.regset().y_index().wrapping_sub(1);
-        let regs = cpu.regset_mut();
-
-        regs.set_zero(y == 0);
-        regs.set_negative(y & 0x80 > 0);
-
-        regs.set_x_index(y);
-
-        Ok(())
-    }
-
-    ///
-    /// Exclusive-or between a memory value and the accumulator
-    ///
-    /// **Zero:** If the resulting value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn eor(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-        let a = cpu.regset().accumulator ^ fetched;
-        let regs = cpu.regset_mut();
-
-        regs.set_zero(a == 0);
-        regs.set_negative(a & 0x80 > 0);
-
-        regs.set_accumulator(a);
-
-        Ok(())
-    }
-
-    ///
-    /// Increment memory value by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn inc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = (verify_and_fetch(cpu)? as u8).wrapping_add(1);
-        let amode_output = cpu.i.as_ref().unwrap().amode_output;
-
-        let address = match amode_output {
-            Fetched { value: _, address } => address,
-            AbsoluteAddress(address) => address,
-            _ => return Err(CpuError::BadAddressing),
-        };
-
-        cpu.writ_byte(address, fetched);
-        let regs = cpu.regset_mut();
-        regs.set_zero(fetched == 0);
-        regs.set_negative(fetched & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Increment X index by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn inx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let x = cpu.regset().x_index().wrapping_add(1);
-        let regs = cpu.regset_mut();
-
-        regs.set_zero(x == 0);
-        regs.set_negative(x & 0x80 > 0);
-
-        regs.set_x_index(x);
-
-        Ok(())
-    }
-
-    ///
-    /// Increment Y index by one
-    ///
-    /// **Zero:** If the resuling value is equal to 0 \
-    /// **Negative:** If the resulting value is negative
-    pub fn iny(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let y = cpu.regset().y_index().wrapping_add(1);
-        let regs = cpu.regset_mut();
-
-        regs.set_zero(y == 0);
-        regs.set_negative(y & 0x80 > 0);
-
-        regs.set_y_index(y);
-
-        Ok(())
-    }
-
-    ///
-    /// Jump to a new location
-    ///
-    pub fn jmp(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let out = cpu.i.as_ref().unwrap().amode_output;
-
-        let next_address = match out {
-            Fetched { value: _, address, } => address,
-            AbsoluteAddress(next_address) => next_address,
-            _ => return Err(CpuError::BadAddressing)
-        };
-
-        cpu.regset_mut().set_prog_counter(next_address);
-
-        Ok(())
-    }
-
-    ///
-    /// Jump to subroutine
-    ///
-    /// Same as `jmp`, but the saves the return address first.
-    pub fn jsr(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let return_address = cpu.pc() - 1;
-        cpu.stk_doublepush(return_address);
-
-        jmp(cpu);
-
-        Ok(())
-    }
-
-    ///
-    /// Load accumulator with a memory value
-    ///
-    /// **Zero:** If the value is 0\
-    /// **Negative:** If the value is negative
-    pub fn lda(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let regs = cpu.regset_mut();
-        regs.set_accumulator(fetched);
-
-        regs.set_zero(fetched == 0);
-        regs.set_negative(fetched & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Load X index with a memory value
-    ///
-    /// **Zero:** If the value is 0\
-    /// **Negative:** If the value is negative
-    pub fn ldx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let regs = cpu.regset_mut();
-        regs.set_x_index(fetched);
-
-        regs.set_zero(fetched == 0);
-        regs.set_negative(fetched & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Load X index with a memory value
-    ///
-    /// **Zero:** If the value is 0\
-    /// **Negative:** If the value is negative
-    pub fn ldy(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let regs = cpu.regset_mut();
-        regs.set_y_index(fetched);
-
-        regs.set_zero(fetched == 0);
-        regs.set_negative(fetched & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Perform a bit shift right to a memory value or to the accumulator
-    ///
-    /// **Zero:** If the resuling value is 0\
-    /// **Negative:** Always gets set to 0 \
-    /// **Carry:** Gets set to value of the lowest bit of the value before shifting
-    pub fn lsr(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched_u16 = verify_and_fetch(cpu)?;
-        let fetched_shifted_u16 = fetched_u16 >> 1;
-        let val = fetched_u16 as u8;
-        let val_shifted = (fetched_shifted_u16 & 0x00FF) as u8;
-
-        if let Some(i) = cpu.i.as_ref() {
-            if i.amode == Imp {
-                let _ = cpu.regset_mut().set_accumulator(val_shifted);
-            } else if let Fetched { value: _, address } = i.amode_output {
-                cpu.writ_byte(address, val_shifted);
-            } else {
-                return Err(CpuError::BadAddressing);
-            }
-        }
-
-        let regs = cpu.regset_mut();
-        regs.set_carry((fetched_shifted_u16 & 0xFF00) > 0);
-        regs.set_zero(val_shifted == 0);
-        regs.set_negative(false);
-
-        Ok(())
-    }
-
-    ///
-    /// No operation - do nothing
-    pub fn nop(cpu: &mut Cpu) -> Result<(), CpuError> {
-        Ok(())
-    }
-
-    ///
-    /// Perform a bitwise "OR" between the accumulator and a memory value
-    pub fn ora(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let a = cpu.regset().accumulator | fetched;
-        let regs = cpu.regset_mut();
-
-        regs.set_accumulator(a);
-
-        regs.set_zero(a == 0x00);
-        regs.set_negative(a & 0x80 > 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Push the accumulator on the stack
-    pub fn pha(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.stk_push(cpu.regset().accumulator());
-
-        Ok(())
-    }
-
-    ///
-    /// Push the status register on the stack
-    ///
-    /// Set the **Break** flag to true before that
-    pub fn php(cpu: &mut Cpu) -> Result<(), CpuError> {
-        // Set Break flag and Unused flag to true before pushing
-        let status = cpu.regset().status() | (1 << 3) | (1 << 4);
-        cpu.stk_push(status);
-
-        Ok(())
-    }
-
-    ///
-    /// Pull the accumulator from the stack
-    ///
-    /// **Zero:** If the pulled value is 0
-    /// **Negative:** If the pulled value is negative
-    pub fn pla(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let a = cpu.stk_pop();
-        let regs = cpu.regset_mut();
-
-        regs.set_accumulator(a);
-        regs.set_zero(a == 0);
-        regs.set_negative((a & 0x80) > 0);
-        Ok(())
-    }
-
-    ///
-    /// Pull the status register from the stack
-    ///
-    /// **Note:** When looking through different sources of information there were some contrasting
-    /// on whether the **Break** flag should be cleared or not before the pulled value is assigned
-    /// to the status. In the current implementation, no changes are made between acquiring the value
-    /// from the stack and assigning it to the actual status register.
-    pub fn plp(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let p = cpu.stk_pop();
-        let regs = cpu.regset_mut();
-        regs.set_status(p);
-        Ok(())
-    }
-
-    ///
-    /// Rotate bit left either the accumulator or a memory value
-    ///
-    /// **Zero:** If the value is equal to 0 \
-    /// **Negative:** If the value is negative \
-    /// **Carry:** 7th bit of the value
-    pub fn rol(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let val = rol_inner(cpu, fetched);
-        let i = cpu.i.as_ref().unwrap();
-        match i.amode_output {
-            ValueOnly(_) => {
-                let _ = cpu.regset_mut().set_accumulator(val);
-            }
-            Fetched { value: _, address } => {
-                cpu.writ_byte(address, val);
-            }
-            _ => return Err(CpuError::BadAddressing)
-        };
-
-        fn rol_inner(cpu: &mut Cpu, fetched: u8) -> u8 {
-            let regs = cpu.regset_mut();
-            let carry = regs.carry() as u8;
-
-            let val = fetched << 1 + carry;
-
-            regs.set_zero(val == 0);
-            regs.set_negative(val & 0x80 > 0);
-            regs.set_carry(fetched & (1 << 7) > 0);
-            val
-        }
-
-        Ok(())
-    }
-
-    ///
-    /// Rotate bit right either the accumulator or a memory value
-    ///
-    /// **Zero:** If the value is equal to 0 \
-    /// **Negative:** If the value is negative \
-    /// **Carry:** If the value is bigger than 255
-    pub fn ror(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)? as u8;
-
-        let val = ror_inner(cpu, fetched);
-        let i = cpu.i.as_ref().unwrap();
-        match i.amode_output {
-            ValueOnly(_) => {
-                let _ = cpu.regset_mut().set_accumulator(val);
-            }
-            Fetched { value: _, address } => {
-                cpu.writ_byte(address, val);
-            }
-            _ => return Err(CpuError::BadAddressing)
-        };
-
-        fn ror_inner(cpu: &mut Cpu, fetched: u8) -> u8 {
-            let regs = cpu.regset_mut();
-            let carry = regs.carry() as u8;
-
-            let val = fetched >> 1 + carry << 7;
-
-            regs.set_zero(val == 0);
-            regs.set_negative(val & 0x80 > 0);
-            regs.set_carry(fetched & 1 > 0);
-            val
-        }
-
-        Ok(())
-    }
-
-    ///
-    /// Return from interrupt
-    ///
-    /// All values of the status registers **may be** altered since the status register is pulled
-    /// from the stack.
-    pub fn rti(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let loaded_status = cpu.stk_pop();
-        let lo = cpu.stk_pop();
-        let hi = cpu.stk_pop();
-        let loaded_pc = Address::from_le_bytes([lo, hi]);
-
-        let regs = cpu.regset_mut();
-        regs.set_prog_counter(loaded_pc);
-        regs.set_status(loaded_status);
-
-        regs.set_brk(false);
-        regs.set_unused(false);
-
-        Ok(())
-    }
-
-    ///
-    /// Return from subroutine
-    ///
-    pub fn rts(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let lo = cpu.stk_pop();
-        let hi = cpu.stk_pop();
-        let loaded_pc = Address::from_le_bytes([lo, hi]);
-
-        cpu.regset_mut().set_prog_counter(loaded_pc.wrapping_add(1));
-
-        Ok(())
-    }
-
-    ///
-    /// Subtract from accumulator with borrow in
-    ///
-    /// `A = A - M - (1 - C)`
-    ///
-    /// **Zero:** If the result is 0 \
-    /// **Negative:** If the result is negative \
-    /// **Carry:** If the result is bigger than 255 \
-    /// **Overflowed:** If the result has overflowed by _sign_
-    pub fn sbc(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let fetched = verify_and_fetch(cpu)?;
-        let fetched_inverted = fetched ^ 0x00FF;
-
-        let regs = cpu.regset_mut();
-        let accumulator_u16 = u16::from(regs.accumulator());
-        let tmp: u16 = accumulator_u16 + fetched_inverted + u16::from(regs.carry());
-        let accumulator = (tmp & 0x00FF) as u8;
-
-        regs.set_carry(tmp > 0xFF);
-        regs.set_zero(accumulator == 0);
-        regs.set_negative((tmp & 0x80) > 0);
-        regs.set_overflowed((!(accumulator_u16 ^ fetched_inverted) & (accumulator_u16 ^ tmp) & 0x80) > 0);
-
-        regs.set_accumulator(accumulator);
-
-        Ok(())
-    }
-
-    ///
-    /// Set carry flag to true
-    ///
-    pub fn sec(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_carry(true);
-        Ok(())
-    }
-
-    ///
-    /// Set decimal mode flag to true
-    ///
-    pub fn sed(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_decimal_mode(true);
-        Ok(())
-    }
-
-    ///
-    /// Set interrupt disabled flag to true
-    ///
-    pub fn sei(cpu: &mut Cpu) -> Result<(), CpuError> {
-        cpu.regset_mut().set_irq_disabled(true);
-        Ok(())
-    }
-
-    ///
-    /// Store accumulator in memory
-    ///
-    pub fn sta(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let _ = verify_and_fetch(cpu)?;
-
-        let a = cpu.regset().accumulator();
-
-        if let Some(i) = cpu.i.as_ref() {
-            if let Fetched { value: _, address } = i.amode_output {
-                cpu.writ_byte(address, a);
-                return Ok(());
-            } else {
-                return Err(CpuError::BadAddressing);
-            }
-        }
-
-        Err(CpuError::CurrentInstructionMissing)
-    }
-
-    ///
-    /// Store X index in memory
-    ///
-    pub fn stx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let _ = verify_and_fetch(cpu)?;
-
-        let x = cpu.regset().x_index();
-
-        if let Some(i) = cpu.i.as_ref() {
-            if let Fetched { value: _, address } = i.amode_output {
-                cpu.writ_byte(address, x);
-                return Ok(());
-            } else {
-                return Err(CpuError::BadAddressing);
-            }
-        }
-
-        Err(CpuError::CurrentInstructionMissing)
-    }
-
-    ///
-    /// Store Y index in memory
-    ///
-    pub fn sty(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let _ = verify_and_fetch(cpu)?;
-
-        let y = cpu.regset().y_index();
-
-        if let Some(i) = cpu.i.as_ref() {
-            if let Fetched { value: _, address } = i.amode_output {
-                cpu.writ_byte(address, y);
-                return Ok(());
-            } else {
-                return Err(CpuError::BadAddressing);
-            }
-        }
-
-        Err(CpuError::CurrentInstructionMissing)
-    }
-
-    ///
-    /// Transfer accumulator to Index X
-    ///
-    /// **Zero:** If the accumulator value is 0\
-    /// **Negative:** If the accumulator value is negative
-    pub fn tax(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let a = regs.accumulator();
-        regs.set_x_index(a);
-        regs.set_negative(a & 0x80 > 0);
-        regs.set_zero(a == 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Transfer accumulator to Index Y
-    ///
-    /// **Zero:** If the accumulator value is 0\
-    /// **Negative:** If the accumulator value is negative
-    pub fn tay(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let a = regs.accumulator();
-        regs.set_y_index(a);
-        regs.set_negative(a & 0x80 > 0);
-        regs.set_zero(a == 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Transfer stack pointer to Index X
-    ///
-    /// **Zero:** If the stack pointer is 0
-    /// **Negative:** If the stack pointer is negative
-    pub fn tsx(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let stk_ptr = regs.stk_ptr();
-        regs.set_x_index(stk_ptr);
-        regs.set_negative(stk_ptr & 0x80 > 0);
-        regs.set_zero(stk_ptr == 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Transfer X index to the accumulator
-    ///
-    /// **Zero:** If the X index value is 0
-    /// **Negative:** If the X index value is negative
-    pub fn txa(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let x = regs.x_index();
-        regs.set_accumulator(x);
-        regs.set_negative(x & 0x80 > 0);
-        regs.set_zero(x == 0);
-
-        Ok(())
-    }
-
-    ///
-    /// Transfer X index to the stack pointer
-    ///
-    /// **Zero:** If the X index value is 0
-    /// **Negative:** If the X index value is negative
-    pub fn txs(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let x = regs.x_index();
-        regs.set_stk_ptr(x);
-
-        Ok(())
-    }
-
-    ///
-    /// Transfer Y index to the accumulator
-    ///
-    /// **Zero:** If the Y index value is 0
-    /// **Negative:** If the Y index value is negative
-    pub fn tya(cpu: &mut Cpu) -> Result<(), CpuError> {
-        let regs = cpu.regset_mut();
-        let y = regs.y_index();
-        regs.set_accumulator(y);
-        regs.set_negative(y & 0x80 > 0);
-        regs.set_zero(y == 0);
-
-        Ok(())
-    }
-
-    #[cfg(test)]
-    mod test {
-        use super::*;
-        use crate::mos6502::AddressingOutput;
-        use std::cell::RefCell;
-        use std::rc::Rc;
-
-        fn setup(
-            custom_pc: Word,
-            connect: bool,
-            opcode: Option<Opcode>,
-            operand: Option<Word>,
-        ) -> Cpu {
-            let mut cpu = Cpu::new_custompc(custom_pc);
-
-            if let Some(opc) = opcode {
-                cpu.i = Some(Instruction::decode_by(opc));
-                cpu.i.as_mut().unwrap().operand = operand;
-            }
-
-            if connect {
-                cpu.connect_to(Rc::new(RefCell::new(MainBus::new())));
-            }
-
-            cpu
-        }
-
-        fn set_amode_output(cpu: &mut Cpu, amode_output: AddressingOutput) {
-            cpu.i.as_mut().unwrap().amode_output = amode_output;
-        }
-
-        #[test]
-        fn test_adc_regular() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x10));
-            set_amode_output(&mut cpu, ValueOnly(0x10));
-
-            let res = adc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x10);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_adc_negative() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x80));
-            set_amode_output(&mut cpu, ValueOnly(0x80));
-
-            let res = adc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x80);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_adc_zero() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x00));
-            set_amode_output(&mut cpu, ValueOnly(0x00));
-
-            let res = adc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x0);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_adc_carry() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, ValueOnly(0x01));
-            cpu.regset_mut().set_accumulator(0xFF);
-
-            let res = adc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_adc_overflowed() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, ValueOnly(0x01));
-            cpu.regset_mut().set_accumulator(0x7F);
-
-            let res = adc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x80);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.overflowed(), true);
-        }
-
-        #[test]
-        fn test_and_zero() {
-            let mut cpu = setup(0x0000, true, Some(0x29), Some(0x0));
-            set_amode_output(&mut cpu, ValueOnly(0x00));
-            cpu.regset_mut().set_accumulator(0x07);
-
-            let res = and(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.negative(), false);
-        }
-
-        #[test]
-        fn test_and_negative() {
-            let mut cpu = setup(0x0000, true, Some(0x29), Some(0x80));
-            set_amode_output(&mut cpu, ValueOnly(0x80));
-            cpu.regset_mut().set_accumulator(0x95);
-
-            let res = and(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x80);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-        }
-
-        #[test]
-        fn test_asl_mem() {
-            let mut cpu = setup(0x0000, true, Some(0x06), Some(0xFF));
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x4F,
-                    address: 0xFF,
-                },
-            );
-            cpu.regset_mut().set_accumulator(0x00);
-
-            let res = asl(&mut cpu);
-            let shifted = cpu.read_byte(0xFF);
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(shifted, 0x4F << 1);
-            let regs = cpu.regset();
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.carry(), false);
-        }
-
-        #[test]
-        fn test_asl_accumulator() {
-            let mut cpu = setup(0x0000, true, Some(0x0A), None);
-            cpu.regset_mut().set_accumulator(0x4);
-            set_amode_output(&mut cpu, ValueOnly(0x4));
-
-            let res = asl(&mut cpu);
-            let regs = cpu.regset();
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.accumulator(), 0x8);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.carry(), false);
-        }
-
-        #[test]
-        fn test_do_branch() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            *cpu.time_mut().residual_mut() = 0;
-
-            do_branch(&mut cpu, 0xFEBE + 10);
-            let regs = cpu.regset();
-
-            assert_eq!(cpu.pc(), 0xFEBE + 10);
-            assert_eq!(cpu.time.residual(), 1);
-        }
-
-        #[test]
-        fn test_do_branch_negative() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            *cpu.time_mut().residual_mut() = 0;
-
-            do_branch(&mut cpu, 0xFEBE - 120);
-            let regs = cpu.regset();
-
-            assert_eq!(cpu.pc(), 0xFEBE - 120);
-            assert_eq!(cpu.time.residual(), 1);
-        }
-
-        #[test]
-        fn test_do_branch_page_cross() {
-            let mut cpu = setup(0xFEFE, true, None, None);
-            *cpu.time_mut().residual_mut() = 0;
-
-            do_branch(&mut cpu, 0xFEFE + 10);
-
-            assert_eq!(cpu.pc(), 0xFEFE + 10);
-            assert_eq!(cpu.time.residual(), 2);
-        }
-
-        #[test]
-        fn test_do_branch_negative_page_cross() {
-            let mut cpu = setup(0xFEFE + 10, true, None, None);
-            *cpu.time_mut().residual_mut() = 0;
-
-            do_branch(&mut cpu, 0xFEFE);
-
-            assert_eq!(cpu.pc(), 0xFEFE);
-            assert_eq!(cpu.time.residual(), 2);
-        }
-
-        #[test]
-        fn test_bit() {
-            let mut cpu = setup(0xFEBE, true, Some(0x24), Some(0x10));
-            cpu.regset_mut().set_accumulator(0x07);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0xC7,
-                    address: 0xAA,
-                },
-            );
-
-            let res_bit = bit(&mut cpu);
-
-            assert_eq!(res_bit.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.overflowed(), true);
-        }
-
-        #[test]
-        fn test_brk() {
-            let mut cpu = setup(0xFEBE, true, Some(0x24), Some(0x10));
-            cpu.regset_mut().set_accumulator(0x07);
-            cpu.regset_mut().set_status(0xA1);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0xC7,
-                    address: 0xAA,
-                },
-            );
-            cpu.writ_byte(BRK_VECTOR, 0xAA);
-            cpu.writ_byte(BRK_VECTOR + 1, 0xAA);
-
-            let res_brk = brk(&mut cpu);
-
-            let saved_status = cpu.stk_pop();
-            let lo = cpu.stk_pop();
-            let hi = cpu.stk_pop();
-            let saved_pc = Address::from_le_bytes([lo, hi]);
-
-            assert_eq!(res_brk.ok(), Some(()));
-            // 1 << 4 is the mask for the Brk bit
-            // 1 << 2 is the mask for the Irq disabled bit
-            assert_eq!(saved_status, 0xA1 | (1 << 4) | (1 << 2));
-            assert_eq!(saved_pc, 0xFEBE + 1);
-
-            let regs = cpu.regset();
-            assert_eq!(regs.brk(), false);
-            assert_eq!(regs.irq_disabled(), true);
-            assert_eq!(cpu.pc(), 0xAAAA);
-        }
-
-        #[test]
-        fn test_clear_flag_bits() {
-            //
-            // This test is for all "Clear ... flag" instructions
-            // CLI, CLD, CLS, CLV
-            //
-
-            let mut cpu = setup(0xFEBE, false, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_carry(true);
-            regs.set_irq_disabled(true);
-            regs.set_decimal_mode(true);
-            regs.set_overflowed(true);
-
-            let res_clv = clv(&mut cpu);
-            let res_cli = cli(&mut cpu);
-            let res_cld = cld(&mut cpu);
-            let res_clc = clc(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_clc.ok(), Some(()));
-            assert_eq!(res_clv.ok(), Some(()));
-            assert_eq!(res_cli.ok(), Some(()));
-            assert_eq!(res_cld.ok(), Some(()));
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.overflowed(), false);
-            assert_eq!(regs.decimal_mode(), false);
-            assert_eq!(regs.irq_disabled(), false);
-        }
-
-        #[test]
-        fn test_sta() {
-            let mut cpu = setup(0xFEBE, true, Some(0x9D), Some(0x10 + 0x13));
-            cpu.regset_mut().set_accumulator(0xAA);
-            cpu.regset_mut().set_x_index(0x13);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x12,
-                    address: 0x10 + 0x13,
-                },
-            );
-            let regs = cpu.regset_mut();
-
-            let res = sta(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.accumulator(), 0xAA);
-            let read_value = cpu.read_word(0x10 + 0x13);
-            assert_eq!(read_value, 0xAA);
-        }
-
-        #[test]
-        fn test_stx() {
-            let mut cpu = setup(0xFEBE, true, Some(0x86), Some(0x10));
-            cpu.regset_mut().set_x_index(0xBB);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x11,
-                    address: 0xEE,
-                },
-            );
-            let regs = cpu.regset_mut();
-
-            let res = stx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0xBB);
-            let read_value = cpu.read_word(0xEE);
-            assert_eq!(read_value, 0xBB);
-        }
-
-        #[test]
-        fn test_sty() {
-            let mut cpu = setup(0xFEBE, true, Some(0x84), Some(0x10));
-            cpu.regset_mut().set_y_index(0xBB);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x11,
-                    address: 0xCD,
-                },
-            );
-
-            let res = sty(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.y_index(), 0xBB);
-            let read_value = cpu.read_word(0xCD);
-            assert_eq!(read_value, 0xBB);
-        }
-
-        #[test]
-        fn test_lda() {
-            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-            let regs = cpu.regset();
-
-            set_amode_output(&mut cpu, ValueOnly(0x10));
-            let res = lda(&mut cpu);
-            let regs = cpu.regset();
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.accumulator(), 0x10);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_lda_negative() {
-            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x80,
-                    address: 0xFE,
-                },
-            );
-            let res = lda(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.accumulator(), 0x80);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_ldx_zero() {
-            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x00,
-                    address: 0xFE,
-                },
-            );
-
-            let res = ldx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0x00);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), true);
-        }
-
-        #[test]
-        fn test_ldy() {
-            let mut cpu = setup(0xFEBE, true, Some(0xA9), Some(0x10));
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x10,
-                    address: 0xFE,
-                },
-            );
-
-            let res = ldy(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.y_index(), 0x10);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_inx() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            cpu.regset_mut().set_x_index(0x09);
-            set_amode_output(&mut cpu, ValueOnly(0x09));
-
-            let res = inx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0xA);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_inx_zero() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            cpu.regset_mut().set_x_index(0xFF);
-            set_amode_output(&mut cpu, ValueOnly(0xFF));
-
-            let res = inx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0x00);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), true);
-        }
-
-        #[test]
-        fn test_inx_negative() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            cpu.regset_mut().set_x_index(0x7F);
-            set_amode_output(&mut cpu, ValueOnly(0x7F));
-
-            let res = inx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0x80);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_inc() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x7E,
-                    address: 0xFE,
-                },
-            );
-
-            let res = inc(&mut cpu);
-
-            let regs = cpu.regset();
-            let read_value = cpu.read_byte(0xFE);
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(read_value, 0x7F);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_inc_negative() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x7F,
-                    address: 0xFE,
-                },
-            );
-
-            let res = inc(&mut cpu);
-
-            let regs = cpu.regset();
-            let read_value = cpu.read_byte(0xFE);
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(read_value, 0x80);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_inc_zero() {
-            let mut cpu = setup(0xFEBE, true, Some(0xE8), None);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0xFF,
-                    address: 0xFE,
-                },
-            );
-
-            let res = inc(&mut cpu);
-
-            let regs = cpu.regset();
-            let read_value = cpu.read_byte(0xFE);
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(read_value, 0x00);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), true);
-        }
-
-        #[test]
-        fn test_do_compare_greater_than() {
-            let mut regset = RegisterSet::default();
-            let lhs: Byte = 14;
-            let rhs: Byte = 12;
-
-            do_compare(&mut regset, lhs, rhs);
-
-            assert_eq!(regset.carry(), true);
-            assert_eq!(regset.negative(), false);
-            assert_eq!(regset.zero(), false);
-        }
-
-        #[test]
-        fn test_do_compare_equal() {
-            let mut regset = RegisterSet::default();
-            let lhs: Byte = 10;
-            let rhs: Byte = 10;
-
-            do_compare(&mut regset, lhs, rhs);
-
-            assert_eq!(regset.carry(), true);
-            assert_eq!(regset.negative(), false);
-            assert_eq!(regset.zero(), true);
-        }
-
-        #[test]
-        fn test_do_compare_less_than() {
-            let mut regset = RegisterSet::default();
-            let lhs: Byte = 1;
-            let rhs: Byte = 10;
-
-            do_compare(&mut regset, lhs, rhs);
-
-            assert_eq!(regset.carry(), false);
-            assert_eq!(regset.negative(), true);
-            assert_eq!(regset.zero(), false);
-        }
-
-        #[test]
-        fn test_cmp() {
-            let mut cpu = setup(0xFEBE, true, Some(0xD5), None);
-            cpu.regset_mut().set_accumulator(0x20);
-            set_amode_output(
-                &mut cpu,
-                Fetched {
-                    value: 0x14,
-                    address: 0xAE,
-                },
-            );
-
-            let res = cmp(&mut cpu);
-
-            let regs = cpu.regset();
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.zero(), false);
-        }
-
-        #[test]
-        fn test_rti() {
-            let mut cpu = setup(0xFEBE, true, Some(0x40), None);
-            set_amode_output(&mut cpu, ValueOnly(0x00));
-            cpu.regset_mut().set_stk_ptr(0xFA);
-            cpu.regset_mut().set_status(0x00);
-            cpu.writ_byte(0x01FB, 0xF1);
-            cpu.writ_byte(0x01FC, 0x01);
-            cpu.writ_byte(0x01FD, 0x40);
-
-            let res = rti(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.prog_counter(), 0x4001);
-            assert_eq!(regs.stk_ptr(), 0xFD);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.brk(), false);
-            assert_eq!(regs.unused(), false);
-            assert_eq!(regs.status(), 0xC1);
-        }
-
-        #[test]
-        fn test_rts() {
-            let mut cpu = setup(0xFEBE, true, Some(0x40), None);
-            set_amode_output(&mut cpu, ValueOnly(0x00));
-            cpu.regset_mut().set_stk_ptr(0xFB);
-            cpu.regset_mut().set_status(0x00);
-            cpu.writ_byte(0x01FC, 0x12);
-            cpu.writ_byte(0x01FD, 0x21);
-
-            let res = rts(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(regs.prog_counter(), 0x2113);
-            assert_eq!(regs.stk_ptr(), 0xFD);
-        }
-
-        #[test]
-        fn test_tax() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_x_index(0xAA);
-            regs.set_accumulator(0x11);
-
-            let res_tax = tax(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_tax.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0x11);
-            assert_eq!(regs.accumulator(), 0x11);
-        }
-
-        #[test]
-        fn test_txa() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_x_index(0xAA);
-            regs.set_accumulator(0x11);
-
-            let res_txa = txa(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_txa.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0xaa);
-            assert_eq!(regs.accumulator(), 0xAA);
-        }
-
-        #[test]
-        fn test_tay() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_y_index(0xAA);
-            regs.set_accumulator(0x11);
-
-            let res_tay = tay(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_tay.ok(), Some(()));
-            assert_eq!(regs.y_index(), 0x11);
-            assert_eq!(regs.accumulator(), 0x11);
-        }
-
-        #[test]
-        fn test_tya() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_y_index(0xAA);
-            regs.set_accumulator(0x11);
-
-            let res_tya = tya(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_tya.ok(), Some(()));
-            assert_eq!(regs.y_index(), 0xAA);
-            assert_eq!(regs.accumulator(), 0xAA);
-        }
-
-        #[test]
-        fn test_txs() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_x_index(0xAA);
-            regs.set_stk_ptr(0x11);
-
-            let res_txs = txs(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_txs.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0xAA);
-            assert_eq!(regs.stk_ptr(), 0xAA);
-        }
-
-        #[test]
-        fn test_tsx() {
-            let mut cpu = setup(0xFEBE, true, None, None);
-            let regs = cpu.regset_mut();
-            regs.set_x_index(0xAA);
-            regs.set_stk_ptr(0x11);
-
-            let res_tsx = tsx(&mut cpu);
-
-            let regs = cpu.regset();
-            assert_eq!(res_tsx.ok(), Some(()));
-            assert_eq!(regs.x_index(), 0x11);
-            assert_eq!(regs.stk_ptr(), 0x11);
-        }
-
-        #[test]
-        fn test_jmp() {
-            let mut cpu = setup(0xFEBE, true, Some(0x6C), Some(0x1010));
-            cpu.i.as_mut().unwrap().amode_output = AbsoluteAddress(0x1010);
-
-            let res = jmp(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            assert_eq!(cpu.pc(), 0x1010);
-        }
-
-        #[test]
-        fn test_sbc_regular() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x10));
-            cpu.regset_mut().set_accumulator(0x20);
-            cpu.regset_mut().set_carry(true);
-            set_amode_output(&mut cpu, ValueOnly(0x10));
-
-            let res = sbc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x10);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_sbc_negative() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x80));
-            cpu.regset_mut().set_accumulator(0x20);
-            cpu.regset_mut().set_carry(true);
-            set_amode_output(&mut cpu, ValueOnly(0x80));
-
-            let res = sbc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0xFF - 0x60 + 1);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.overflowed(), true);
-        }
-
-        #[test]
-        fn test_sbc_zero() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x00));
-            set_amode_output(&mut cpu, ValueOnly(0x00));
-            cpu.regset_mut().set_carry(true);
-
-            let res = sbc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x0);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.negative(), false);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_sbc_overflowed() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, ValueOnly(0x01));
-            cpu.regset_mut().set_accumulator(0x00);
-
-            let res = sbc(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0xFF - 1);
-            assert_eq!(regs.carry(), false);
-            assert_eq!(regs.zero(), false);
-            assert_eq!(regs.negative(), true);
-            assert_eq!(regs.overflowed(), false);
-        }
-
-        #[test]
-        fn test_rol() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, Fetched { value: 0x80, address: 0x00 });
-            let regs = cpu.regset_mut();
-            regs.set_zero(false);
-            regs.set_carry(false);
-            regs.set_negative(true);
-
-            let res = rol(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.negative(), false);
-        }
-
-        #[test]
-        fn test_rol_acc() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, ValueOnly(0x80));
-            let regs = cpu.regset_mut();
-            regs.set_zero(false);
-            regs.set_carry(false);
-            regs.set_negative(true);
-            regs.set_accumulator(0x80);
-
-            let res = rol(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.negative(), false);
-        }
-
-        #[test]
-        fn test_ror() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, Fetched {
-                value: 0x1,
-                address: 0x0000,
-            });
-            let regs = cpu.regset_mut();
-            regs.set_zero(false);
-            regs.set_carry(false);
-            regs.set_negative(true);
-            regs.set_accumulator(0x00);
-
-            let res = ror(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.negative(), false);
-        }
-
-        #[test]
-        fn test_ror_acc() {
-            let mut cpu = setup(0x0000, true, Some(0x69), Some(0x01));
-            set_amode_output(&mut cpu, ValueOnly(0x1));
-            let regs = cpu.regset_mut();
-            regs.set_zero(false);
-            regs.set_carry(false);
-            regs.set_negative(true);
-            regs.set_accumulator(0x01);
-
-            let res = ror(&mut cpu);
-
-            assert_eq!(res.ok(), Some(()));
-            let regs = cpu.regset();
-            assert_eq!(regs.accumulator(), 0x00);
-            assert_eq!(regs.zero(), true);
-            assert_eq!(regs.carry(), true);
-            assert_eq!(regs.negative(), false);
-        }
     }
 }
 
@@ -2848,16 +995,16 @@ mod m6502_addressing_modes {
     /// This addressing mode is the simplest one, because it is
     /// use only with instructions which do not need any additional
     /// context -- it is _implied_.
-//
-//  No operands here. This addressing mode does not use any
-//  additional values. In this current implementation
-//  the accumulator addressing mode is "simulated" by
-//  calling `implied_am`. The only difference between the
-//  two is that the accumulator AM is using the
-//  value of the accumulator as its operand, hence the name --
-//  accumulator. That is why the contents of the
-//  accumulator are set as this addressing mode's output.
-//
+    //
+    //  No operands here. This addressing mode does not use any
+    //  additional values. In this current implementation
+    //  the accumulator addressing mode is "simulated" by
+    //  calling `implied_am`. The only difference between the
+    //  two is that the accumulator AM is using the
+    //  value of the accumulator as its operand, hence the name --
+    //  accumulator. That is why the contents of the
+    //  accumulator are set as this addressing mode's output.
+    //
     pub fn implied_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let accumulator = cpu.regset().accumulator();
         let fetched = ValueOnly(accumulator);
@@ -3045,7 +1192,7 @@ mod m6502_addressing_modes {
     pub fn indirect_am(cpu: &mut Cpu) -> Result<AddressingOutput, CpuError> {
         let i = cpu.i.as_ref().unwrap();
         if let Some(ptr) = i.operand {
-// Simulate hardware bug
+            // Simulate hardware bug
             let page_crossed = (ptr & 0x00FF) == 0x00FF;
             let address_of_next_hi = if page_crossed { ptr & 0xFF00 } else { ptr + 1 };
 
@@ -3474,20 +1621,20 @@ impl Cpu {
 
     /// **stk_push()** - Pushes a byte to the stack stored in memory with offset `STACK_OFFSET`.
     /// Note that this routine will fail if no interface is connected.
-    fn stk_push(&mut self, data: Byte) {
+    pub(crate) fn stk_push(&mut self, data: Byte) {
         let stk_ptr = self.stk_ptr_dec();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         self.writ_byte(addr, data);
     }
 
-    fn stk_doublepush(&mut self, data: Word) {
+    pub(crate) fn stk_doublepush(&mut self, data: Word) {
         self.stk_push((data >> 8) as u8);
         self.stk_push((data) as u8);
     }
 
     /// **stk_pop()** - Pops a byte from the stack stored in memory with offset `STACK_OFFSET`.
     /// **NB:** This routine will fail if no 2 passed; 0 failinterface is connected.
-    fn stk_pop(&mut self) -> Byte {
+    pub(crate) fn stk_pop(&mut self) -> Byte {
         let stk_ptr = self.stk_ptr_inc();
         let addr = STACK_OFFSET + Address::from(stk_ptr);
         let data = self.read_byte(addr);
@@ -3517,7 +1664,7 @@ impl Cpu {
 
     /// **load_program()** - Given a vector of bytes, store `limit` of them into memory
     /// starting from `begin` in memory.
-    fn load_program(
+    pub fn load_program(
         &mut self,
         program: &Vec<Byte>,
         begin: Address,
@@ -3573,11 +1720,11 @@ pub fn load_operand_curr_i(cpu: &mut Cpu) {
         return;
     }
 
-// The instruction is already loaded since we are looking at it
-// The reason we are updating this value here and not beforehand
-// is sa that a support could be provided for `load_operand()`
-// also a.k.a so that we can load operands for instructions
-// which are not the current one whici is being executed.
+    // The instruction is already loaded since we are looking at it
+    // The reason we are updating this value here and not beforehand
+    // is sa that a support could be provided for `load_operand()`
+    // also a.k.a so that we can load operands for instructions
+    // which are not the current one whici is being executed.
     let loaded_from: Address = cpu.pc() - 1;
 
     let num_fetched = match cpu.i.as_ref().unwrap().amode {
@@ -3607,11 +1754,11 @@ pub fn load_operand_curr_i(cpu: &mut Cpu) {
 /// requires taking into account that the address of the instruction in memory
 /// is also provided.
 pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
-// Store previous state
+    // Store previous state
     let saved_pc = cpu.pc();
-// The instruction has already been fetched
-// so if address is where the instruction is
-// then address + 1 is where the operand is.
+    // The instruction has already been fetched
+    // so if address is where the instruction is
+    // then address + 1 is where the operand is.
     *cpu.regset_mut().prog_counter_mut() = address.wrapping_add(1);
 
     let saved_i = cpu.i.clone();
@@ -3621,7 +1768,7 @@ pub fn load_operand(cpu: &mut Cpu, i: &mut Instruction, address: Address) {
 
     i.clone_from(&cpu.i.as_ref().unwrap());
 
-// Restore previous state
+    // Restore previous state
     cpu.i.clone_from(&saved_i);
     *cpu.regset_mut().prog_counter_mut() = saved_pc;
 }
@@ -3730,7 +1877,7 @@ mod test {
     #[test]
     fn test_decode_by_correct() {
         use super::m6502_addressing_modes::relative_am;
-        use super::m6502_intruction_set::bpl;
+        // use crate::mos6502_intruction_set::bpl;
 
         let cpu = Cpu::new_connected(Some(Rc::new(RefCell::new(MainBus::new()))));
         let i = Instruction::decode_by(0x10);
@@ -3752,24 +1899,24 @@ mod test {
             141, 2, 0, 234, 234, 234,
         ];
 
-// Loads this program (assembled [here](https://www.masswerk.at/6502/assembler.html))
-//
-// *=$8000 ; set PC=0x8000
-// LDX #10
-// STX $0000
-// LDX #3
-// STX $0001
-// LDY $0000
-// LDA #0
-// CLC
-// loop
-// ADC $0001
-// DEY
-// BNE loop
-// STA $0002
-// NOP
-// NOP
-// NOP
+        // Loads this program (assembled [here](https://www.masswerk.at/6502/assembler.html))
+        //
+        // *=$8000 ; set PC=0x8000
+        // LDX #10
+        // STX $0000
+        // LDX #3
+        // STX $0001
+        // LDY $0000
+        // LDA #0
+        // CLC
+        // loop
+        // ADC $0001
+        // DEY
+        // BNE loop
+        // STA $0002
+        // NOP
+        // NOP
+        // NOP
 
         let old_pc = cpu.load_program(&prog, 0x8000, prog.len(), true);
         assert_eq!(old_pc.ok(), Some(0x1000));
@@ -3846,11 +1993,11 @@ mod test {
         cpu.regset_mut().set_irq_disabled(false);
 
         let success = cpu.inthandle(Irq);
-// irq cycles
+        // irq cycles
         for _ in 0..7 {
             cpu.clock_cycle();
         }
-// "lda #10" cycles
+        // "lda #10" cycles
         for _ in 0..2 {
             cpu.clock_cycle();
         }
@@ -3890,11 +2037,11 @@ mod test {
         cpu.regset_mut().set_irq_disabled(true);
 
         let success = cpu.inthandle(InterruptKind::Nmi);
-// irq cycles
+        // irq cycles
         for _ in 0..8 {
             cpu.clock_cycle();
         }
-// "lda #10" cycles
+        // "lda #10" cycles
         for _ in 0..2 {
             cpu.clock_cycle();
         }
