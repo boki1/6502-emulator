@@ -1,14 +1,26 @@
-# 6502 emulator
+# 65-o'-2
 
+This is an emulator of the MOS 6502 CPU.
 
-<img src="https://user-images.githubusercontent.com/36764968/115720442-c1109780-a385-11eb-96e2-94fef80e8b93.png" width=400 align="right">
+*Currently supported features*
+- support for all legal opcodes
+- support for all addressing modes
+- emulates cycle-correctness
+- easy integration with GUI monitor
 
-##### BG
+*Possible future upgrades*
+- illegal opcodes support
+- more monitor customization options
+- web integration
 
-Емулатор на 6502 процесор. Поддържа всички "легални" инструкции заедно с всички режими на адресиране.
-За повече информация, може да разгледате [Wiki страницата на проекта](https://github.com/boki1/6502-emulator/wiki/Начало).
+*Example*
+```
+# Clone the repository
+git clone https://github.com/boki1/6502-emulator
 
-##### EN
+# Choose the example you would like to try out
+cd 6502-emulator/examples/fib/src
 
-Emulator of the 6502 CPU. Support for all legal opcodes and addressing modes.  
-Click [here](https://github.com/boki1/6502-emulator/wiki/Home) for more in-depth look.
+# Run it
+cargo run
+```
